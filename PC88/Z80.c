@@ -411,6 +411,7 @@ static Z80_NOINLINE void Z80_CB_ATTR CodesCB(register Z80 *R)
   register byte I;
 
   I=OpZ80(R->PC.W++);
+  R->R++;                                   /* 2 回目の M1 */
   R->ICount-=CyclesCB[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[0]++; z80PfxCycles[0]+=CyclesCB[I]; }
@@ -480,6 +481,7 @@ static Z80_NOINLINE void Z80_EXEC_ATTR CodesED(register Z80 *R)
   register pair J;
 
   I=OpZ80(R->PC.W++);
+  R->R++;                                   /* 2 回目の M1 */
   R->ICount-=CyclesED[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80EdCount[256], z80EdCycles, z80LdiDst[16], z80LdiSrc[16]; z80EdCount[I]++; z80EdCycles+=CyclesED[I];
@@ -489,7 +491,7 @@ static Z80_NOINLINE void Z80_EXEC_ATTR CodesED(register Z80 *R)
   {
 #include "CodesED.h"
     case PFX_ED:
-      R->PC.W--;break;
+      R->PC.W--;R->R--;break;
     default:
       if(R->TrapBadOps)
         printf
@@ -507,6 +509,7 @@ static Z80_NOINLINE void CodesDD(register Z80 *R)
 
 #define XX IX
   I=OpZ80(R->PC.W++);
+  R->R++;                                   /* 2 回目の M1(DD CB d op の CB もここ。d と op は M1 ではない) */
   R->ICount-=CyclesXX[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[1]++; z80PfxCycles[1]+=CyclesXX[I]; }
@@ -516,7 +519,7 @@ static Z80_NOINLINE void CodesDD(register Z80 *R)
 #include "CodesXX.h"
     case PFX_FD:
     case PFX_DD:
-      R->PC.W--;break;
+      R->PC.W--;R->R--;break;
     case PFX_CB:
       CodesDDCB(R);break;
     default:
@@ -537,6 +540,7 @@ static Z80_NOINLINE void CodesFD(register Z80 *R)
 
 #define XX IY
   I=OpZ80(R->PC.W++);
+  R->R++;                                   /* 2 回目の M1(DD CB d op の CB もここ。d と op は M1 ではない) */
   R->ICount-=CyclesXX[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[2]++; z80PfxCycles[2]+=CyclesXX[I]; }
@@ -546,7 +550,7 @@ static Z80_NOINLINE void CodesFD(register Z80 *R)
 #include "CodesXX.h"
     case PFX_FD:
     case PFX_DD:
-      R->PC.W--;break;
+      R->PC.W--;R->R--;break;
     case PFX_CB:
       CodesFDCB(R);break;
     default:
@@ -580,6 +584,7 @@ void ResetZ80(Z80 *R)
   R->IY.W     = 0x0000;
   R->I        = 0x00;
   R->R        = 0x00;
+  R->R7       = 0x00;
   R->IFF      = 0x00;
   R->ICount   = R->IPeriod;
   R->IRequest = INT_NONE;
@@ -602,16 +607,18 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
   /* R に戻すのは、R を見る関数を呼ぶとき(プレフィックス命令・割込み・I/O・デバッガ)と戻るとき */
   pair LPC;
   int LIC;
+  unsigned LR;                                             /* R(M1 の回数)もローカルで数える */
 #undef RPC
 #undef RIC
 #undef Z80_IOSYNC
 #define RPC LPC
 #define RIC LIC
 #define Z80_IOSYNC() (R->ICount=LIC)                       /* I/O は R->ICount でライン内の位置を見る */
-#define Z80_SAVE()   (R->PC=LPC,R->ICount=LIC)
-#define Z80_LOAD()   (LPC=R->PC,LIC=R->ICount)
+#define Z80_SAVE()   (R->PC=LPC,R->ICount=LIC,R->R=(byte)LR)
+#define Z80_LOAD()   (LPC=R->PC,LIC=R->ICount,LR=R->R)
 
   LPC=R->PC;
+  LR=R->R;
   for(LIC=RunCycles;;)
   {
     while(LIC>0)
@@ -629,6 +636,7 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
 
       /* Read opcode and count cycles */
       I=OpZ80(LPC.W++);
+      LR++;
       /* Count cycles */
       LIC-=Cycles[I];
 
@@ -688,6 +696,7 @@ void IntZ80(Z80 *R,zword Vector)
   
   if((R->IFF&IFF_1)||(Vector==INT_NMI))
   {
+    R->R++;                                   /* 割込みの応答も M1 */
     /* Save PC on stack */
     M_PUSH(PC);
 

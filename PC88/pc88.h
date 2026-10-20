@@ -85,7 +85,7 @@ void pc88VideoInvalidate();
 // ---- 音(PC88.ino / host が実装) ----
 void    pc88OpnWrite(uint8_t reg, uint8_t val);  // YM2203(FM と SSG。タイマーは pc88_core 側)
 uint8_t pc88SsgRead(uint8_t reg);               // SSG のレジスタ読み出し(I/O ポートはジョイスティック)
-void    pc88Beep(bool on);                      // ビープ(ポート 40h bit5)
+void    pc88Speaker(uint8_t bits);              // ポート 40h の bit5(BEEP)・bit7(SING)
 
 // 今のラインで本体の Z80 が実行したサイクル数(0〜PC88_CYCLES_PER_LINE-1)。PC88.ino / host が実装
 int pc88LineCycle();

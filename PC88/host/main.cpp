@@ -71,7 +71,8 @@ uint8_t pc88SsgRead(uint8_t reg) {
   if (reg == 14 || reg == 15) ssgJoyReads[reg - 14]++;
   return reg == 14 ? joyR14 : reg == 15 ? joyR15 : ssgRegs[reg & 15];
 }
-void pc88Beep(bool) {}
+// OPNLOG にポート 40h の BEEP/SING も FF として出す(5 列目 = ラインの中のクロック)
+void pc88Speaker(uint8_t bits) { if (opnLog) fprintf(opnLog, "%d %d FF %02X %d\n", curFrameForLog, curLineForLog, bits & 0xA0, pc88LineCycle()); }
 
 // ---- 命令トレース(Z80.c を DEBUG 付きでビルドしたときだけ呼ばれる) ----
 struct TraceEnt { uint16_t pc, sp, af, hl, bc, de; uint8_t op; };
@@ -271,10 +272,46 @@ static int boot(const std::string &dir, int frames, const std::string &out, int 
       if (!c) break;
       p = c + 1;
     }
+  // SWAP=frame:drive:<d88>[#n],...  そのフレームでドライブ(1/2)のディスクを入れ替える(<d88> が - なら取り出す)
+  struct SwapEv { int frame, drive; std::string spec; };
+  std::vector<SwapEv> swaps;
+  if (const char *sw = getenv("SWAP"))
+    for (std::string all = sw; !all.empty();) {
+      size_t c = all.find(',');
+      std::string one = all.substr(0, c);
+      all = c == std::string::npos ? "" : all.substr(c + 1);
+      SwapEv e = { 0, 0, "" };
+      size_t p1 = one.find(':'), p2 = p1 == std::string::npos ? p1 : one.find(':', p1 + 1);
+      if (p2 == std::string::npos) continue;
+      e.frame = atoi(one.c_str()); e.drive = atoi(one.c_str() + p1 + 1); e.spec = one.substr(p2 + 1);
+      swaps.push_back(e);
+    }
   if (getenv("PIOLOG")) pc88PioHook = pioLog;
+  if (getenv("FDCLOG")) {                          // FDC のコマンドと結果
+    upd765CmdHook = [](const uint8_t *c, int n) { printf("FDC f%d cmd", curFrame); for (int i = 0; i < n; i++) printf(" %02X", c[i]); printf("\n"); };
+    upd765ResultHook = [](const uint8_t *r, int n) { printf("FDC f%d res", curFrame); for (int i = 0; i < n; i++) printf(" %02X", r[i]); printf("\n"); };
+  }
   for (int f = 1; f <= frames; f++) {
     curFrame = f;
     curFrameForLog = f;
+    for (const SwapEv &e : swaps) {
+      if (e.frame != f || e.drive < 1 || e.drive > 2) continue;
+      Pc88Drive &dv = drv[e.drive - 1];
+      if (e.spec == "-") { pc88EjectD88(dv); printf("SWAP f%d drive%d: eject\n", f, e.drive); continue; }
+      std::string path = e.spec;
+      int img = 0;
+      size_t hash = path.rfind('#');
+      if (hash != std::string::npos) { img = atoi(path.c_str() + hash + 1); path = path.substr(0, hash); }
+      uint32_t n;
+      uint8_t *p = loadFile(path, &n);
+      if (!p) { printf("SWAP %s: not found\n", path.c_str()); continue; }
+      uint32_t o = 0;
+      for (int i = 0; i < img && o + 0x2B0 <= n; i++) o += p[o + 0x1C] | (p[o + 0x1D] << 8) | (p[o + 0x1E] << 16) | ((uint32_t)p[o + 0x1F] << 24);
+      uint32_t sz = o + 0x2B0 <= n ? (p[o + 0x1C] | (p[o + 0x1D] << 8) | (p[o + 0x1E] << 16) | ((uint32_t)p[o + 0x1F] << 24)) : 0;
+      if (o + sz > n) sz = n - o;
+      printf("SWAP f%d drive%d %s image %d: %s\n", f, e.drive, path.c_str(), img, sz && pc88LoadD88(dv, p + o, sz) ? "OK" : "NG");
+      free(p);
+    }
     if (f == 1 && getenv("OPNLOG")) opnLog = fopen(getenv("OPNLOG"), "w");
     for (int r = 0; r < 16; r++) pc88_key[r] = 0xFF;
     for (const KeyEv &e : keys)
@@ -351,8 +388,8 @@ static int boot(const std::string &dir, int frames, const std::string &out, int 
       }
       if (getenv("TEXTDUMP")) {                    // テキストの設定と、DMA で読む各文字行(文字 + 属性)
         Pc88Crtc &c = pc88.crtc;
-        printf("  crtc ve=%d rev=%d h=%d l=%d r=%d attrMode=%d attrNum=%d skip=%d | dma mode=%02X addr=%04X count=%04X | p30=%02X p31=%02X p53=%02X hs=%d\n",
-               c.ve, c.reverse, c.h, c.l, c.r, c.attrMode, c.attrNum, c.skipLine, pc88.dmac.mode, pc88.dmac.addr[2], pc88.dmac.count[2],
+        printf("  crtc ve=%d rev=%d h=%d l=%d r=%d v=%d attrMode=%d attrNum=%d skip=%d | dma mode=%02X addr=%04X count=%04X | p30=%02X p31=%02X p53=%02X hs=%d\n",
+               c.ve, c.reverse, c.h, c.l, c.r, c.v, c.attrMode, c.attrNum, c.skipLine, pc88.dmac.mode, pc88.dmac.addr[2], pc88.dmac.count[2],
                pc88.p30, pc88.p31, pc88.p53, pc88.highSpeed);
         uint16_t a = pc88.dmac.addr[2];
         for (int row = 0; row < c.l; row++) {
@@ -364,6 +401,14 @@ static int boot(const std::string &dir, int frames, const std::string &out, int 
           printf("\n");
         }
       }
+    }
+  }
+  if (const char *sv = getenv("SAVED88")) {        // SAVED88=drive:file  最後にそのドライブの D88 を書き出す
+    int dn = atoi(sv);
+    const char *fn = strchr(sv, ':');
+    if (fn && dn >= 1 && dn <= 2 && drv[dn - 1].inserted) {
+      FILE *fo = fopen(fn + 1, "wb");
+      if (fo) { fwrite(drv[dn - 1].buffer, 1, drv[dn - 1].size, fo); fclose(fo); printf("saved drive%d -> %s (%u bytes)\n", dn, fn + 1, drv[dn - 1].size); }
     }
   }
   if (const char *md = getenv("MEMDUMP")) {

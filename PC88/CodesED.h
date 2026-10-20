@@ -95,14 +95,14 @@ case LD_A_I:
   R->AF.B.l=(R->AF.B.l&C_FLAG)|(R->IFF&IFF_2? P_FLAG:0)|ZSTable[R->AF.B.h];
   break;
 
-case LD_A_R:
-  R->R++;
-  R->AF.B.h=(byte)(R->R-R->ICount);
+case LD_A_R:   /* R は M1(命令の取り込み。プレフィックスも1回)ごとに増える。R を使って復号する
+                  コピープロテクト(リターン・オブ・イシター)があるので実機と同じ値を返す */
+  R->AF.B.h=(R->R&0x7F)|R->R7;
   R->AF.B.l=(R->AF.B.l&C_FLAG)|(R->IFF&IFF_2? P_FLAG:0)|ZSTable[R->AF.B.h];
   break;
 
 case LD_I_A:   R->I=R->AF.B.h;break;
-case LD_R_A:   break;
+case LD_R_A:   R->R=R->AF.B.h;R->R7=R->AF.B.h&0x80;break;
 
 case IM_0:     R->IFF&=~(IFF_IM1|IFF_IM2);break;
 case IM_1:     R->IFF=(R->IFF&~IFF_IM2)|IFF_IM1;break;

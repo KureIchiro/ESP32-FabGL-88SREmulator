@@ -206,24 +206,38 @@ static void saveJoyKeys() {
 }
 
 // ---------------------------------------------------------------------------
-//  音: YM2203(FM 3ch + SSG 3ch)+ ビープ
+//  音: YM2203(FM 3ch + SSG 3ch)+ ビープ・SING(ポート 40h の bit5 / bit7。スピーカーは 1 本で、
+//   BEEP = 2.4kHz の発振を出す / 止める、SING = CPU がスピーカーを直接オン/オフ。SR より前のソフトの
+//   音楽・効果音(ハイドライドなど)は SING と BEEP を CPU で切り替えて鳴らす)
 //   FM は ym2203.cpp、SSG は MSX2 版と同じ AY-3-8910 の作り(クロック 3.9936MHz/2)。
-//   エミュレーション側(コア0)はレジスタの書き込みをキューに積むだけで、
-//   サウンド側(コア1 の loop)がキューを読んで反映しながら音を作る。
+//   エミュレーション側(コア0)はレジスタの書き込みを「エミュレーションの時刻」付きでキューに積むだけで、
+//   サウンド側(コア1 の loop)がキューを読んで、その時刻のサンプルで反映しながら音を作る。
+//   (以前は時刻なしで、1ms ごとにまとめて反映していた。CPU は 1 フレームを 5〜15ms で走って残りは
+//    待つので、フレームの中の書き込みの間隔が実際の 1/3〜4/5 に縮み、タイマー割込みで鳴らす曲の
+//    音の並びが最大 ±6ms ほどがたついていた)
 // ---------------------------------------------------------------------------
 static const int SND_BUFFER_SIZE = 512;
 static const int OPN_QUEUE = 1024;
-static volatile uint16_t opnQueue[OPN_QUEUE];  // 上位 = レジスタ、下位 = 値
+// bit31-16 = 時刻(CPU 32 クロック単位の下位 16bit)、bit15-8 = レジスタ、bit7-0 = 値。
+// 4KB なので setup でメイン RAM のページを内部 RAM に置いたあと(opnGen.begin)に確保する
+static volatile uint32_t *opnQueue = nullptr;
 static volatile int opnQHead = 0, opnQTail = 0;
-static volatile bool beepOn = false;
 
-void pc88OpnWrite(uint8_t reg, uint8_t val) {
+// エミュレーションの時刻(CPU クロック)。cpuTask が 1 ラインごとに進める = 終わったラインの終わり。
+// これより前の時刻の書き込みは全部キューに入っている
+static volatile uint32_t opnEmuClock = 0;
+
+static const uint8_t SPK_REG = 0xFF;             // キューの中でポート 40h(BEEP・SING)を表すレジスタ番号
+static void soundQueuePush(uint8_t reg, uint8_t val) {
   int next = (opnQHead + 1) % OPN_QUEUE;
-  if (next == opnQTail) return;                    // あふれたら捨てる(ふつうは起きない)
-  opnQueue[opnQHead] = (uint16_t)((reg << 8) | val);
+  if (next == opnQTail || !opnQueue) return;       // あふれたら捨てる(ふつうは起きない)
+  uint32_t t = opnEmuClock + (uint32_t)pc88LineCycle();
+  opnQueue[opnQHead] = ((t >> 5) << 16) | ((uint32_t)reg << 8) | val;
   opnQHead = next;
 }
-void pc88Beep(bool on) { beepOn = on; }
+void pc88OpnWrite(uint8_t reg, uint8_t val) { soundQueuePush(reg, val); }
+// ポート 40h の bit7(SING)・bit5(BEEP)。SING は数百 Hz〜数 kHz で切り替えられるので、OPN と同じく時刻付きで送る
+void pc88Speaker(uint8_t bits) { soundQueuePush(SPK_REG, bits & 0xA0); }
 
 class OpnGenerator : public fabgl::WaveformGenerator {
   Ym2203Fm *fm = nullptr;
@@ -244,8 +258,33 @@ class OpnGenerator : public fabgl::WaveformGenerator {
   // MSX2 版の表は直線に近く、Ys2 の伴奏(音量 8〜11)が実機より 2.5〜4 倍大きく出ていた
   const int16_t volTable[16] = { 0, 1, 1, 2, 3, 4, 6, 8, 11, 16, 22, 32, 45, 64, 90, 127 };
   int32_t  dcPrev = 0, dcOut = 0;                  // 直流を取る1次ハイパス(約10Hz)
-  // ---- ビープ(2.4kHz の矩形波) ----
+  // FM の高音の補正(1次ローパス、y += 0.78 × (x − y)。4kHz −2.3dB、8kHz −3.9dB)。
+  // 16384Hz で計算した FM は 8kHz を超える倍音・FB のノイズが折り返して、2kHz より上がチップ
+  // (約 55kHz で計算して 7.5kHz で帯域制限した音)より 2〜5dB 強い。Ys2・アルファ・Daiva・LastArmageddon の
+  // 比較で、帯域ごとの差が 1/2〜1/3 になる強さ。0 にすると補正なし
+  #define FM_TREBLE_FIX 200
+  int32_t  fmLp = 0;
+  // ---- ビープ(2.4kHz の矩形波)と SING ----
   uint32_t beepPhase = 0, beepStep = 0;
+  uint8_t  spk = 0;                                // ポート 40h の bit7(SING)・bit5(BEEP)
+  // SING の切り替えがサンプルの途中だったときは、そのサンプルを切り替えの前後の長さで混ぜる
+  // (16384Hz に丸めると 1kHz の音でも周期が 1 サンプルずつ揺れてざらつくため)。値は 1/256 単位
+  bool     singPend = false;
+  int32_t  singArea = 0, singRem = 0;
+  static const int SPK_AMP = 60;                   // スピーカーの振れ幅(FM 1ch の 1/2 弱。以前のビープと同じ)
+
+  // w = 次に作るサンプルの中で、切り替えのあとの長さ(0〜256)
+  void spkWrite(uint8_t v, int32_t w) {
+    bool oldSing = spk & 0x80, newSing = v & 0x80;
+    spk = v;
+    if (oldSing == newSing) return;
+    if (!singPend) { singArea = oldSing ? 256 - w : 0; singRem = w; singPend = true; }
+    else {
+      if (w > singRem) w = singRem;
+      if (oldSing) singArea += singRem - w;
+      singRem = w;
+    }
+  }
   int16_t  buf[SND_BUFFER_SIZE];
   volatile int head = 0, tail = 0;
   int16_t  lastSample = 0;
@@ -317,6 +356,8 @@ class OpnGenerator : public fabgl::WaveformGenerator {
 
 public:
   void begin(int rate) {
+    opnQueue = (volatile uint32_t *)heap_caps_malloc(sizeof(uint32_t) * OPN_QUEUE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (!opnQueue) opnQueue = (volatile uint32_t *)ps_malloc(sizeof(uint32_t) * OPN_QUEUE);
     fm = ym2203Create(PC88_CPU_CLOCK, rate);
     setSampleRate(rate);
   }
@@ -327,26 +368,73 @@ public:
   }
   uint8_t ssgRead(uint8_t reg) { return regs[reg & 15]; }
 
+  // キューの先頭の書き込みを反映(w = SING の切り替えの位置。applyQueued の説明は spkWrite)
+  void applyQueued(int32_t w = 256) {
+    uint32_t e = opnQueue[opnQTail];
+    opnQTail = (opnQTail + 1) % OPN_QUEUE;
+    uint8_t r = (e >> 8) & 0xFF, v = e & 0xFF;
+    if (r == SPK_REG) spkWrite(v, w);
+    else if (r < 0x10) ssgWrite(r, v); else ym2203WriteReg(fm, r, v);
+  }
+
+  // 書き込みの時刻合わせ: 次に作るサンプルのエミュレーションの時刻 sndClock(CPU クロック)。1 サンプル
+  // 243.75 クロックずつ進め、時刻がそこまで来た書き込みを反映する。sndClock は CPU が終えた時刻
+  // (opnEmuClock)を越えない(越えそうなら止めて待つ = CPU が遅れたときは今までどおり届いたときに反映)。
+  // CPU が取り戻しで何フレームも続けて走り 1.25 フレームより先に行ったら、溜まった分をまとめて反映して追いつく
+  uint32_t sndClock = 0, sndFrac = 0;
+  void advanceClock(int n, uint32_t emu) {
+    uint32_t f = sndFrac + (uint32_t)n * 49152u;        // 0.75 クロック = 49152 / 65536
+    sndClock += (uint32_t)n * 243u + (f >> 16);
+    sndFrac = f & 0xFFFF;
+    if ((int32_t)(sndClock - emu) > 0) { sndClock = emu; sndFrac = 0; }
+  }
+
   void fillBuffer() {
     if (!fm) return;
-    // キューのレジスタ書き込みを反映
-    while (opnQTail != opnQHead) {
-      uint16_t e = opnQueue[opnQTail];
-      opnQTail = (opnQTail + 1) % OPN_QUEUE;
-      uint8_t r = e >> 8, v = e & 0xFF;
-      if (r < 0x10) ssgWrite(r, v); else ym2203WriteReg(fm, r, v);
+    const uint32_t frameClk = PC88_CYCLES_PER_LINE * PC88_LINES_PER_FRAME;
+    uint32_t emu = opnEmuClock;
+    if ((int32_t)(emu - sndClock) > (int32_t)(frameClk + frameClk / 4)) {
+      while (opnQTail != opnQHead) applyQueued();
+      sndClock = emu - frameClk; sndFrac = 0;
     }
     int space = (tail - head - 1 + SND_BUFFER_SIZE) % SND_BUFFER_SIZE;
     while (space > 0) {
       int n = space > 64 ? 64 : space;
+      // 時刻が来た書き込みを反映し、次の書き込みの時刻でブロックを切る
+      while (opnQTail != opnQHead) {
+        uint32_t t16 = opnQueue[opnQTail] >> 16;
+        int32_t d = (int16_t)(t16 - (sndClock >> 5));                 // 32 クロック単位
+        if (d > 0) {
+          if ((int16_t)(t16 - (emu >> 5)) <= 0) {                     // (CPU がまだ終えていないラインの書き込みなら、今回は届かない)
+            int m = (int)(((d << 5) + 243) / 244);                    // そこまでのサンプル数(切り上げ)
+            if (m < n) n = m;
+          }
+          break;
+        }
+        int32_t w = (-d * 32 * 256 + 122) / 244;                        // サンプルの中で書き込みのあとの長さ
+        applyQueued(w > 256 ? 256 : w);
+      }
+      advanceClock(n, emu);
       ym2203Generate(fm, fmBuf, n);
       for (int i = 0; i < n; i++) {
-        // FM 1ch 最大 ±64(3ch で ±192)、SSG 1ch 最大 0〜42(fmgen / M88 と同じく SSG 1ch の振れ幅は
-        // FM 1ch の 1/3)。直流をハイパスで取ってから、±96 を超えた分を 1/3 に縮め、±127 で切る。
-        // 【不具合修正】以前は SSG が鳴っていないときに出力が -95 にずれていて(直流)、FM の下半分が
-        // 潰れて歪んでいた
-        int32_t x = ((fmBuf[i] >> 7) + ssgSample() / 3) << 8;
-        if (beepOn) { beepPhase += beepStep; x += ((beepPhase & 0x80000000u) ? 30 : -30) << 8; }
+        // FM 1ch 最大 ±64、SSG 1ch 最大 0〜85(振れ幅 FM 1ch の 2/3)。Common Source Project(fmgen、
+        // FM・PSG とも 0dB)と同じ比: fmgen の SSG 音量 15 は ±0x4000/3、FM のオペレータは最大 ±8192。
+        // (MAME の比 = SSG が FM の約2倍 にしたら Ys2 のオープニング後半の FM のメロディが SSG の伴奏に
+        //  埋もれた。その前の 1/3 では前半の SSG のメロディが FM の和音に埋もれていた)
+        // 直流をハイパスで取ってから、±96 を超えた分を 1/3 に縮め、±127 で切る
+#if FM_TREBLE_FIX
+        fmLp += ((fmBuf[i] - fmLp) * FM_TREBLE_FIX) >> 8;
+#else
+        fmLp = fmBuf[i];
+#endif
+        int32_t x = ((fmLp >> 7) + ((ssgSample() * 171) >> 8)) << 8;
+        if (spk | singPend) {                          // スピーカー: BEEP の発振と SING の OR
+          int32_t lv;
+          if (singPend) { lv = singArea + ((spk & 0x80) ? singRem : 0); singPend = false; }
+          else lv = (spk & 0x80) ? 256 : 0;
+          if (spk & 0x20) { beepPhase += beepStep; if (beepPhase & 0x80000000u) lv = 256; }
+          x += lv * SPK_AMP;
+        }
         dcOut = x - dcPrev + dcOut - (dcOut >> 8);
         dcPrev = x;
         int32_t s = dcOut >> 8;
@@ -533,6 +621,7 @@ static String selectD88File(const char *title, const String &current) {
     // 画面全体を描くのはフォルダに入ったときだけ。カーソルを動かしたら前と今の2行、
     // スクロールしたら一覧の部分だけ描き直す(全部消して描くとちらつく)
     int shownTop = -1, shownCursor = -1;
+    int listTop = 0;                               // 一覧のいちばん上の項目(カーソルが画面の外に出たときだけ動かす)
     auto drawItem = [&](int idx, int top) {
       int y = 36 + (idx - top) * 8;
       canvas->setBrushColor(fabgl::Color::Blue);
@@ -545,7 +634,11 @@ static String selectD88File(const char *title, const String &current) {
       canvas->drawText(16, y, label.c_str());
     };
     auto draw = [&]() {
-      int top = cursor >= visible ? cursor - visible + 1 : 0;
+      // スクロールはカーソルが画面の上端・下端を越えたときだけ(以前は一番下まで行ってから上へ戻すと、
+      // カーソルの位置はそのままで、すぐ一覧のほうが動いた)
+      if (cursor < listTop) listTop = cursor;
+      if (cursor >= listTop + visible) listTop = cursor - visible + 1;
+      int top = listTop;
       if (shownTop < 0) {
         canvas->setBrushColor(fabgl::Color::Blue);
         canvas->clear();
@@ -945,6 +1038,7 @@ void cpuTask(void *) {
       ExecZ80(&cpu, CPU_CYCLES_PER_LINE);
 #endif
       pc88Line(i);
+      opnEmuClock += CPU_CYCLES_PER_LINE;              // 音の書き込みの時刻(このラインまで終わった)
       if (i == PC88_DISPLAY_LINES) frameReady = true;
       if (pc88IrqPending() && (cpu.IFF & IFF_1)) IntZ80(&cpu, pc88IrqAck());
     }

@@ -51,10 +51,10 @@ struct Pc88State {
   uint8_t  irqMaskE6;
   int      levelLimit;
   bool     canInt;
-  bool     opnIrqPrev, opnIrqHeld;
   uint32_t rtcAcc;                // 1/600 秒タイマー(CPU クロック)
   // ---- そのほか ----
   bool     vrtc;
+  int      dispLines;             // このフレームの表示期間(出力の行数 = CRTC の L×R ラスタ / 2、最大 200)
   uint32_t frame;
   uint16_t kanjiAddr;
   uint8_t  opnAddr;

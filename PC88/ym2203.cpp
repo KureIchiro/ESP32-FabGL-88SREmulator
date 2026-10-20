@@ -85,6 +85,7 @@ struct Ym2203Fm {
   uint16_t na;                           // タイマー A の値(24h/25h。CSM 用)
   bool     timerA;                       // タイマー A が動いている(27h bit0)
   uint64_t csmAcc;                       // CSM: タイマー A の進み(FM のサンプル数 × 65536)
+  uint32_t fbIncLo, fbIncHi;             // FB の制限: オペレータ1 の位相の増分 300Hz / 1800Hz 相当(0 = 制限なし)
 };
 
 static inline int keycode(uint16_t fnum, uint8_t block) {
@@ -216,6 +217,10 @@ void ym2203Reset(Ym2203Fm *fm) {
   memset(fm, 0, sizeof(*fm));
   fm->clock = clock; fm->rate = rate;
   fm->scaleQ16 = (uint64_t)((double)clock / 72.0 / rate * 65536.0 + 0.5);   // FM の分周はリセット時 1/6(×12)
+  if (rate < 30000) {                    // 出力がチップの FM の周波数(約 55kHz)より大幅に低いときだけ FB を制限
+    fm->fbIncLo = (uint32_t)(300.0 / rate * 4294967296.0);
+    fm->fbIncHi = (uint32_t)(1800.0 / rate * 4294967296.0);
+  }
   for (int c = 0; c < 3; c++)
     for (int k = 0; k < 4; k++) {
       FmOp &o = fm->ch[c].op[k];
@@ -320,7 +325,25 @@ void YM_FAST ym2203Generate(Ym2203Fm *fm, int32_t *out, int n) {
       bool silent = true;
       for (int k = 0; k < 4; k++) if (op[k].state != EG_OFF) silent = false;
       if (silent) continue;
-      int fbm = ch.fb ? (int)((ch.fb0 + ch.fb1) >> (10 - ch.fb)) : 0;
+      int fbm = 0;
+      if (ch.fb) {
+        fbm = (int)((ch.fb0 + ch.fb1) >> (10 - ch.fb));
+        // FB の効きを 16384Hz で成り立つところまでに制限する。FB はオペレータ1 の直前2回の出力を位相に足すので、
+        // 1 サンプルの間隔がチップ(約 55kHz)の 3.4 倍あると、効きが FB5 前後(実効 = FB − 減衰/6dB が 4〜5.5)の
+        // ところで実機にない 5〜6kHz の音が出る。そこだけ実効 4.0(300Hz 未満は 4.25)まで弱める。
+        // 実効 5.5 以上は実機でもノイズになり 16384Hz でも同じようなノイズになるので、そのまま。
+        // 1800Hz 以上では弱めても実機に近づかないので、そのまま
+        // (チップの周波数で計算した音との比較で決めた。誤差 7〜11dB → 2〜5dB、計算の増加はほぼなし)
+        uint32_t inc0 = op[0].inc;
+        if (inc0 < fm->fbIncHi) {
+          int e = ch.fb * 64 - op[0].att;          // 実効の効き(1/64 段)
+          int emax = inc0 < fm->fbIncLo ? 272 : 256;
+          if (e > emax && e < 352) {
+            int d = (e - emax) * 4;                // 2^(-(e - emax)/64) を掛ける
+            fbm = (fbm * (int)(expTab[d & 255] >> (d >> 8))) >> 13;
+          }
+        }
+      }
       int o1 = opCalc(op[0], fbm), o2, o3, o4, v;
       ch.fb0 = ch.fb1; ch.fb1 = o1;
       switch (ch.alg) {

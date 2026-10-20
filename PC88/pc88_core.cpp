@@ -244,24 +244,27 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
       uint8_t old = s.p32;
       s.p32 = v;
       if ((old ^ v) & 0x20) s.palDirty = true;
-      if ((old & 0x80) && !(v & 0x80) && s.opnIrqHeld) { s.opnIrqHeld = false; request(4); }   // OPN のマスク解除で保留分
+      if ((old & 0x80) && !(v & 0x80) && ym2203TimerIrq(s.opnTimer)) request(4);   // OPN のマスク解除: IRQ が出ていれば要求
       updateMap();
       break;
     }
     case 0x34: s.p34 = v; break;
     case 0x35: s.p35 = v; if (v & 0x80) s.vramSel = 3; updateMap(); break;
-    case 0x40: {
+    // 40h〜43h は同じ(アドレスのデコードが A2 から上だけ)。ミルキーウェイは「PC-8801mkII」を選ぶと
+    // 41h の bit7(SING)で曲を鳴らす(OUT (C) で C を INC/DEC するだけでポートを替える書き方)
+    case 0x40: case 0x41: case 0x42: case 0x43: {
       uint8_t old = s.p40;
       s.p40 = v;
       if ((v & 0x02) && !(old & 0x02)) calStrobe();
       if ((v & 0x04) && !(old & 0x04)) calClock();
-      if ((old ^ v) & 0x20) pc88Beep((v & 0x20) != 0);
+      if ((old ^ v) & 0xA0) pc88Speaker(v);                         // bit5 = BEEP、bit7 = SING
       break;
     }
     case 0x44: s.opnAddr = v; break;
     case 0x45:
       if (s.opnAddr < 0x10) s.ssgShadow[s.opnAddr] = v;
       ym2203TimerWrite(s.opnTimer, s.opnAddr, v);
+      if (s.opnAddr == 0x27 && !ym2203TimerIrq(s.opnTimer)) s.irqReq &= (uint8_t)~0x10;   // IRQ が消えた: 未応答の要求も消す
       pc88OpnWrite(s.opnAddr, v);
       break;
     case 0x50: case 0x51: pc88CrtcWrite(p, v); break;
@@ -316,18 +319,17 @@ void PC88_FAST pc88Line(int line) {
   if (line < PC88_DISPLAY_LINES) pc88RenderLine(line);
   uint32_t t1 = profClock();
   pc88ProfRender += t1 - t0;
-  if (line == PC88_DISPLAY_LINES) { s.vrtc = true; request(1); s.frame++; calTick(); }
+  // VRTC は CRTC の表示期間(L×R ラスタ)の終わりから(サークII は 24 行 × 16 ラスタ = 384 ラスタで 192 行目)
+  if (line == s.dispLines) { s.vrtc = true; request(1); s.frame++; calTick(); }
   // 1/600 秒(6656 クロック)
   s.rtcAcc += PC88_CYCLES_PER_LINE;
   while (s.rtcAcc >= 6656) { s.rtcAcc -= 6656; request(2); }
-  // OPN のタイマー(1 行 = 322 クロック = 1290/16 us)。割込みは立ち上がりで要求
+  // OPN のタイマー(1 行 = 322 クロック = 1290/16 us)。割込みはレベル: IRQ が出ている間は要求し続ける
+  // (MAME と同じ。YM2203 の IRQ は i8214 にそのまま入る)。立ち上がりだけで要求していたときは、
+  // タイマー B の割込みの処理中に A があふれ、ハンドラが B のフラグだけ消して戻ると、IRQ が出たまま
+  // 二度と要求されず OPN の割込みが止まっていた(夢幻戦士ヴァリス2 デモ)。フラグを消したら要求も消す(0x45)
   ym2203TimerAdvance(s.opnTimer, 1290);
-  bool irq = ym2203TimerIrq(s.opnTimer);
-  if (irq && !s.opnIrqPrev) {
-    if (!(s.p32 & 0x80)) request(4); else s.opnIrqHeld = true;
-  }
-  if (!irq) s.opnIrqHeld = false;
-  s.opnIrqPrev = irq;
+  if (ym2203TimerIrq(s.opnTimer)) request(4);
   uint32_t t2 = profClock();
   pc88DiskLine();
   pc88ProfDisk += profClock() - t2;
@@ -364,9 +366,9 @@ void pc88Reset() {
   s.bg[0] = s.bg[1] = s.bg[2] = 0;
   s.palDirty = true;
   s.irqReq = 0; s.irqMaskE6 = 0; s.levelLimit = 0; s.canInt = true;
-  s.opnIrqPrev = s.opnIrqHeld = false;
   s.rtcAcc = 0;
   s.vrtc = false;
+  s.dispLines = PC88_DISPLAY_LINES;
   s.opnAddr = 0;
   memset(s.ssgShadow, 0, sizeof(s.ssgShadow));
   ym2203TimerReset(s.opnTimer, PC88_CPU_CLOCK);

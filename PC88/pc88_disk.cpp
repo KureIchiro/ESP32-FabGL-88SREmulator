@@ -12,7 +12,8 @@
 //     サブが本体より先に進むことはない(最後の1バイトを出してすぐ 8255 を初期化する
 //     Thexder のローダーなどで、本体が合図を取りこぼさない)。
 //     サブがポート C を何度読んでも何も変わらない(本体からの指示待ち)ときは、
-//     本体が 8255 に書くまで止めておく(処理の節約)。
+//     本体が 8255 に書くまで止めておく(処理の節約)。ただし本体も 8255 を読み続けている
+//     (お互いに相手を待っている)ときは止めない: サブの待ちには時間切れで抜けるものがある。
 //   ・FDC の割込みは NOP(データバス 00h)として受ける: HALT を抜けて割込み禁止にするだけ。
 // ============================================================================
 #ifdef ARDUINO
@@ -50,6 +51,8 @@ static int     subCycles;               // サブがこの行のどこまで進�
 static bool    subSleep;                // 本体からの指示待ちで止めている
 static int     samePolls;               // サブがポート C を読んで同じ値だった回数
 static uint8_t lastSubPCIn;
+static int     mainPolls;               // この行で本体が 8255 を読んだ回数(書くと 0)
+#define MAIN_POLL_WAKE 4                // 1 行にこれより多く読んだら、本体も待っている(サブを止めない)
 
 // デバッグ用フック(PC のテスト環境): side 0 = 本体 / 1 = サブ、write = 書き込み
 void (*pc88PioHook)(int side, int port, uint8_t v, bool write);
@@ -162,7 +165,11 @@ uint8_t pc88PioRead(int port) {
   if (!present) return 0xFF;
   switch (port) {
     case 0xFC: case 0xFD: case 0xFE: {
-      if (!subSleep) syncSub(mainNow());
+      // 本体が書かずに読み続けている(本体もサブを待っている)ときは、止めていたサブを起こす。
+      // サブの待ちループには時間切れで抜けるものがある(アルファ / WILL がサブに置くコードは、本体の
+      // 合図を約 55ms 待ってから ROM のコマンド待ちに戻る)。止めたままだと、どちらも相手を待ち続ける
+      if (subSleep) { if (++mainPolls > MAIN_POLL_WAKE) { subSleep = false; subCycles = mainNow(); } }
+      else { mainPolls++; syncSub(mainNow()); }
       uint8_t v = port == 0xFC ? pioReadA(pm, ps) : port == 0xFD ? pioReadB(pm, ps) : pioReadC(pm, ps);
       if (pc88PioHook) pc88PioHook(0, port, v, false);
       return v;
@@ -184,16 +191,19 @@ void pc88PioWrite(int port, uint8_t v) {
     default: return;
   }
   samePolls = 0;
+  mainPolls = 0;
 }
 
 void pc88DiskLine() {
   if (!present) return;
   upd765Tick(80);                                      // 1 行 ≒ 80us
-  if (subSleep) { subCycles = 0; return; }
+  if (subSleep) { subCycles = 0; mainPolls = 0; return; }
   syncSub(PC88_CYCLES_PER_LINE);
   subCycles -= PC88_CYCLES_PER_LINE;
   // ポート C を同じ値で何度も読んでいて、FDC も止まっている: 本体からの指示待ち
-  if (samePolls > 64 && (upd765ReadStatus() & 0xF0) == 0x80 && !upd765Irq()) subSleep = true;
+  // (本体もこの行で 8255 を読み続けていたら止めない)
+  if (samePolls > 64 && mainPolls <= MAIN_POLL_WAKE && (upd765ReadStatus() & 0xF0) == 0x80 && !upd765Irq()) subSleep = true;
+  mainPolls = 0;
 }
 
 // デバッグ用: サブの PC と 8255 の状態
@@ -222,6 +232,6 @@ void pc88DiskReset() {
 #endif
   pioControl(pm, 0x9B);                                // リセット直後の 8255 は全部入力
   pioControl(ps, 0x9B);
-  subCycles = 0; subSleep = false; samePolls = 0; lastSubPCIn = 0;
+  subCycles = 0; subSleep = false; samePolls = 0; lastSubPCIn = 0; mainPolls = 0;
   upd765Reset();
 }

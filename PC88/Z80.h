@@ -88,6 +88,8 @@ typedef struct
   pair AF1,BC1,DE1,HL1;               /* Shadow registers    */
   byte IFF,I;                         /* Interrupt registers */
   byte R;                             /* Refresh register    */
+                                      /* (M1 ごとに 1 増やす。読むときは下位7bit だけ使い、bit7 は R7) */
+  byte R7;                            /* LD R,A で書いた bit7 */
 
   int IPeriod,ICount; /* Set IPeriod to number of CPU cycles */
                       /* between calls to LoopZ80()          */

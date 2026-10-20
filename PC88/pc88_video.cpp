@@ -214,6 +214,10 @@ void pc88VideoFrameStart() {
   curRow = -1;
   carryColor = 0xE8;                        // フレームの始めは白・装飾なし
   carryDeco = 0;
+  // 表示期間は CRTC の L×R ラスタ(グラフィックも)。その下は枠(黒)で、VRTC もそこから
+  // [MAME upd3301 recompute_parameters visarea / update_vrtc_timer][M88 CRTC screenheight・ClearText のマスク]
+  int ras = c.l * c.r;
+  s.dispLines = ras >= PC88_DISPLAY_LINES * 2 ? PC88_DISPLAY_LINES : ras < 2 ? 1 : ras / 2;
   if (s.palDirty) pc88VideoPaletteChanged();
 }
 
@@ -316,6 +320,16 @@ void PC88_FAST pc88RenderLine(int y) {
   uint32_t *dst = (uint32_t *)pc88_rows[y];   // 画面(VGA)の行
   if (!dst) return;
   if (!tablesReady) buildTables();
+  if (y >= s.dispLines) {                     // CRTC の表示期間の外(サークII の 24 行 = 192 行目から): 黒
+    pc88GvDirty[y] = 0;
+    uint32_t bk = (videoGen * 0x9E3779B1u) ^ 0x6B43A9B5u;
+    if (bk == lineKey[y]) return;
+    lineKey[y] = bk;
+    pc88LinesDrawn++;
+    const uint32_t blackW = blackNative * 0x01010101u;
+    for (int i = 0; i < 160; i++) dst[i] = blackW;
+    return;
+  }
   // ---- テキストの行(DMA は描かない行でも進める) ----
   int raster = y * 2;
   int r = c.r < 2 ? 2 : c.r;
