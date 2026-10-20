@@ -1,103 +1,6 @@
 # NEC PC-8801mkIISR Emulator for ESP32
 
-[ [English](#english) | [日本語](#日本語) ]
-
----
-
-<a id="english"></a>
-# English
-
-An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Work in Progress). It supports VGA output, PS/2 keyboards, D88 disk images, the FDD sub-CPU, FM sound (YM2203) and a serial-connected external joystick.
-
-## 📝 Overview
-
-- **Target Frame Rate**: **55.4 Hz** (55.416 Hz)
-  - This is the **vertical scanning frequency of the real PC-8801 with a 24 kHz (high-resolution) monitor** in 25-line mode (448 rasters per frame, 400 displayed). It is not a performance compromise.
-  - The "about 60 Hz" often quoted for the PC-8801 is the 15 kHz (standard resolution) monitor (approx. 61–62 Hz). This emulator emulates the 24 kHz monitor only.
-  - VGA output itself is 640x480 @ 60 Hz (each PC-8801 line is shown twice).
-- **Emulated**: main Z80 (4 MHz) + FDD sub-CPU Z80, N88-BASIC V2 / V1(S) / V1(H) / N-BASIC, text (μPD3301 CRTC + μPD8257 DMA, attributes, semigraphics, skip line), 640x200 8-colour graphics with analog palette, ALU / independent plane access, YM2203 FM 3ch (with SSG-EG and CSM voice) + SSG 3ch, beeper, μPD765 FDC with D88 images (multi-image files supported).
-- **Not emulated**: 15 kHz monitor mode, 640x400 monochrome (shown thinned to 200 lines), Sound Board II (OPNA), joystick port, CMT / RS-232C / mouse, memory wait.
-- **Audio**: 16384 Hz (FabGL default). FM and SSG are mixed into the 8-bit DAC.
-
-> ⚠️ **Notice Regarding Development & Licenses**
->
-> Most of the main source code is built and modified based on AI-generated code. Therefore, the developer does not completely grasp all internal logic and cannot answer detailed questions regarding source code specifications. Thank you for your understanding.
-> Please refer to the header comments at the beginning of the source code for license details and agree to them before use.
-
----
-
-## 🤝 Credits & Acknowledgments
-
-- **Graphics/Audio Engine**: Uses [FabGL](https://github.com/fdivitto/FabGL) by Fabrizio Di Vittorio.
-- **Z80 CPU Core**: Modified based on the work by Marat Fayzullin (used for both the main CPU and the FDD sub-CPU).
-- **FM sound (YM2203), CRTC / DMA, FDC and the rest**: newly written for this project. The hardware behaviour was studied from the source code and documents of **MAME**, **QUASI88** and **M88** (see `PC88_REQUIREMENTS.md`).
-
-### 📜 Core Licenses
-The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own license.
-
----
-
-## 🛠️ Environment & Build Settings
-
-- **Board Manager**: ESP32 by Espressif Systems (**v2.0.5 Recommended**)
-- **Library**: FabGL v1.0.9
-- **Board**: `ESP32 Dev Module` (TTGO VGA32)
-- **PSRAM**: `"Enabled"` (**Required**)
-
----
-
-## 📂 SD Card Structure
-
-```text
-/ (SD Root)
-└── /PC88
-    ├── N88.ROM          : N88-BASIC 32KB (required)
-    ├── N88_0.ROM〜N88_3.ROM : N88 extension ROMs 8KB each (needed for V2 / disk BASIC)
-    ├── N80.ROM          : N-BASIC 32KB (optional)
-    ├── DISK.ROM         : FDD unit ROM 2KB / 8KB (without it, disks cannot be used)
-    ├── KANJI1.ROM       : Kanji ROM level 1, 128KB (the character font is also taken from here)
-    ├── KANJI2.ROM       : Kanji ROM level 2 (optional)
-    ├── JOYKEY.CFG       : Joystick button key assignment (created automatically)
-    └── <folders>/*.D88  : Disk images (sub-folders are allowed)
-```
-
----
-
-## 🚀 Boot Menu
-
-| Item | Description |
-| :--- | :--- |
-| Disk1 / Disk2 | Choose a D88 for each drive. For a file containing several disks, choose which one. If Disk1 is such a file and Disk2 is empty, the next disk goes to Disk2 automatically. The selector opens in the folder of the most recently chosen disk. |
-| Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
-| Joy B1〜B3 | Key pressed by joystick buttons 1–3 (Enter → press the key; F6–F12 cancel). Default SPACE / RETURN / ESC. |
-| Run | Start |
-
-The boot menu and the disk selectors can also be operated with the 1P controller: Up/Down = select (repeats while held), Left/Right = page up/down, button 1 = Enter, button 2 = cancel (ESC).
-
----
-
-## 🕹️ Operations Guide
-
-- **`[F12]`** : Pause / Resume
-- **`[Shift] + [F12]`** : Reset (reboots the ESP32 and returns to the boot menu). If a disk has been written and not saved to SD, the first press only pauses with a warning; press again to reset.
-- **While paused `[F10]` / `[F11]`** : Change the disk in drive 1 / 2
-- **While paused `[Shift] + [F10]` / `[Shift] + [F11]`** : Write drive 1 / 2 back to the SD card
-- Special keys (Japanese 106 keyboard): STOP = End, HELP = ScrollLock, GRPH = left Alt, KANA = Katakana/Hiragana or right Alt, ROLL UP/DOWN = PageUp/PageDown, INS/DEL = BackSpace / Delete. KANA and CAPS are lock keys.
-
----
-
-## 🔌 Joystick (External Controller)
-
-Same converter and protocol as the MSX / MarkIII emulators: serial `IO39`, 115200 bps, 1 byte per port (b7 = port, b6–b4 = buttons 3–1, b3–b0 = right/left/down/up, active low).
-
-- The joystick works like JoyToKey: directions press the numeric keypad 8 / 2 / 4 / 6, buttons 1–3 press the keys chosen in the boot menu.
-- The SR joystick port (SSG I/O ports) is **not** emulated (reads as nothing connected). Some games read both the port and the keypad with opposite meanings (e.g. Space Harrier: keypad 8 = up, lever up = down), so only the key mapping is used.
-
----
-
-## Disclaimer
-
-IN NO EVENT SHALL FABRIZIO DI VITTORIO, MARAT FAYZULLIN, OR THE DEVELOPER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE. USE AT YOUR OWN RISK.
+[ [日本語](#日本語) | [English](#english) ]
 
 ---
 
@@ -195,3 +98,100 @@ MSX・マーク III 版と同じ変換器・同じ通信仕様です：シリア
 ## 免責事項
 
 本ソフトウェアの使用によって生じたいかなる損害についても、FABRIZIO DI VITTORIO 氏、MARAT FAYZULLIN 氏、および開発者は一切の責任を負いません。自己責任でご利用ください。
+
+---
+
+<a id="english"></a>
+# English
+
+An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Work in Progress). It supports VGA output, PS/2 keyboards, D88 disk images, the FDD sub-CPU, FM sound (YM2203) and a serial-connected external joystick.
+
+## 📝 Overview
+
+- **Target Frame Rate**: **55.4 Hz** (55.416 Hz)
+  - This is the **vertical scanning frequency of the real PC-8801 with a 24 kHz (high-resolution) monitor** in 25-line mode (448 rasters per frame, 400 displayed). It is not a performance compromise.
+  - The "about 60 Hz" often quoted for the PC-8801 is the 15 kHz (standard resolution) monitor (approx. 61–62 Hz). This emulator emulates the 24 kHz monitor only.
+  - VGA output itself is 640x480 @ 60 Hz (each PC-8801 line is shown twice).
+- **Emulated**: main Z80 (4 MHz) + FDD sub-CPU Z80, N88-BASIC V2 / V1(S) / V1(H) / N-BASIC, text (μPD3301 CRTC + μPD8257 DMA, attributes, semigraphics, skip line), 640x200 8-colour graphics with analog palette, ALU / independent plane access, YM2203 FM 3ch (with SSG-EG and CSM voice) + SSG 3ch, beeper, μPD765 FDC with D88 images (multi-image files supported).
+- **Not emulated**: 15 kHz monitor mode, 640x400 monochrome (shown thinned to 200 lines), Sound Board II (OPNA), joystick port, CMT / RS-232C / mouse, memory wait.
+- **Audio**: 16384 Hz (FabGL default). FM and SSG are mixed into the 8-bit DAC.
+
+> ⚠️ **Notice Regarding Development & Licenses**
+>
+> Most of the main source code is built and modified based on AI-generated code. Therefore, the developer does not completely grasp all internal logic and cannot answer detailed questions regarding source code specifications. Thank you for your understanding.
+> Please refer to the header comments at the beginning of the source code for license details and agree to them before use.
+
+---
+
+## 🤝 Credits & Acknowledgments
+
+- **Graphics/Audio Engine**: Uses [FabGL](https://github.com/fdivitto/FabGL) by Fabrizio Di Vittorio.
+- **Z80 CPU Core**: Modified based on the work by Marat Fayzullin (used for both the main CPU and the FDD sub-CPU).
+- **FM sound (YM2203), CRTC / DMA, FDC and the rest**: newly written for this project. The hardware behaviour was studied from the source code and documents of **MAME**, **QUASI88** and **M88** (see `PC88_REQUIREMENTS.md`).
+
+### 📜 Core Licenses
+The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own license.
+
+---
+
+## 🛠️ Environment & Build Settings
+
+- **Board Manager**: ESP32 by Espressif Systems (**v2.0.5 Recommended**)
+- **Library**: FabGL v1.0.9
+- **Board**: `ESP32 Dev Module` (TTGO VGA32)
+- **PSRAM**: `"Enabled"` (**Required**)
+
+---
+
+## 📂 SD Card Structure
+
+```text
+/ (SD Root)
+└── /PC88
+    ├── N88.ROM          : N88-BASIC 32KB (required)
+    ├── N88_0.ROM〜N88_3.ROM : N88 extension ROMs 8KB each (needed for V2 / disk BASIC)
+    ├── N80.ROM          : N-BASIC 32KB (optional)
+    ├── DISK.ROM         : FDD unit ROM 2KB / 8KB (without it, disks cannot be used)
+    ├── KANJI1.ROM       : Kanji ROM level 1, 128KB (the character font is also taken from here)
+    ├── KANJI2.ROM       : Kanji ROM level 2 (optional)
+    ├── JOYKEY.CFG       : Joystick button key assignment (created automatically)
+    └── <folders>/*.D88  : Disk images (sub-folders are allowed)
+```
+
+---
+
+## 🚀 Boot Menu
+
+| Item | Description |
+| :--- | :--- |
+| Disk1 / Disk2 | Choose a D88 for each drive. For a file containing several disks, choose which one. If Disk1 is such a file and Disk2 is empty, the next disk goes to Disk2 automatically. The selector opens in the folder of the most recently chosen disk. |
+| Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
+| Joy B1〜B3 | Key pressed by joystick buttons 1–3 (Enter → press the key; F6–F12 cancel). Default SPACE / RETURN / ESC. |
+| Run | Start |
+
+The boot menu and the disk selectors can also be operated with the 1P controller: Up/Down = select (repeats while held), Left/Right = page up/down, button 1 = Enter, button 2 = cancel (ESC).
+
+---
+
+## 🕹️ Operations Guide
+
+- **`[F12]`** : Pause / Resume
+- **`[Shift] + [F12]`** : Reset (reboots the ESP32 and returns to the boot menu). If a disk has been written and not saved to SD, the first press only pauses with a warning; press again to reset.
+- **While paused `[F10]` / `[F11]`** : Change the disk in drive 1 / 2
+- **While paused `[Shift] + [F10]` / `[Shift] + [F11]`** : Write drive 1 / 2 back to the SD card
+- Special keys (Japanese 106 keyboard): STOP = End, HELP = ScrollLock, GRPH = left Alt, KANA = Katakana/Hiragana or right Alt, ROLL UP/DOWN = PageUp/PageDown, INS/DEL = BackSpace / Delete. KANA and CAPS are lock keys.
+
+---
+
+## 🔌 Joystick (External Controller)
+
+Same converter and protocol as the MSX / MarkIII emulators: serial `IO39`, 115200 bps, 1 byte per port (b7 = port, b6–b4 = buttons 3–1, b3–b0 = right/left/down/up, active low).
+
+- The joystick works like JoyToKey: directions press the numeric keypad 8 / 2 / 4 / 6, buttons 1–3 press the keys chosen in the boot menu.
+- The SR joystick port (SSG I/O ports) is **not** emulated (reads as nothing connected). Some games read both the port and the keypad with opposite meanings (e.g. Space Harrier: keypad 8 = up, lever up = down), so only the key mapping is used.
+
+---
+
+## Disclaimer
+
+IN NO EVENT SHALL FABRIZIO DI VITTORIO, MARAT FAYZULLIN, OR THE DEVELOPER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE. USE AT YOUR OWN RISK.
