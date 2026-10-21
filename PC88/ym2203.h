@@ -13,6 +13,42 @@
 //    キューに積み、サウンド側が ym2203WriteReg() で反映する(PC88.ino)。
 // ============================================================================
 
+// ---- FB(オペレータ1 の自己フィードバック)のクリップ(ym2203.cpp の ym2203Generate) ----
+//  出力 16384Hz ではチップ(約 55kHz)の 3.4 倍の間隔で FB を回すので、効きが FB5 前後のところで
+//  実機にない 5〜6kHz の音が出る。そこだけ FB の効きを YM_FB_CLIP_MAX まで弱める。
+//  ・実効の強さ e = FB の値 × 64 − オペレータ1 の減衰(env + TL。64 = 6dB = 1 段)。単位は 1/64 段
+//    (FB 4・減衰なし = 256、FB 7 を TL 16(12dB)で使う = 7×64 − 128 = 320)
+//  ・YM_FB_CLIP_MAX < e < YM_FB_CLIP_NOISE のとき、e を YM_FB_CLIP_MAX にする
+//    (オペレータ1 が YM_FB_CLIP_LO_HZ 未満なら YM_FB_CLIP_MAX_LO)。
+//    YM_FB_CLIP_NOISE 以上はチップでもノイズになり 16384Hz でも同じようなノイズになるので、そのまま
+//  ・オペレータ1 が YM_FB_CLIP_HI_HZ 以上なら制限しない(弱めてもチップに近づかなかった)
+//  ・出力が YM_FB_CLIP_RATE Hz 以上なら制限しない。YM_FB_CLIP_ENABLE 0 で制限なし
+//  既定値はチップの周波数で計算した音との比較で決めたもの(2026-10-20)
+#ifndef YM_FB_CLIP_ENABLE
+#define YM_FB_CLIP_ENABLE   1
+#endif
+#ifndef YM_FB_CLIP_MAX
+//#define YM_FB_CLIP_MAX      256     // 4.0 段
+#define YM_FB_CLIP_MAX      192     // 3.0 段
+#endif
+#ifndef YM_FB_CLIP_MAX_LO
+//#define YM_FB_CLIP_MAX_LO   272     // 4.25 段(低い音)
+#define YM_FB_CLIP_MAX_LO   128     // 2.0 段(低い音)
+#endif
+#ifndef YM_FB_CLIP_NOISE
+//#define YM_FB_CLIP_NOISE    352     // 5.5 段
+#define YM_FB_CLIP_NOISE    384      // 6.0 段
+#endif
+#ifndef YM_FB_CLIP_LO_HZ
+#define YM_FB_CLIP_LO_HZ    400
+#endif
+#ifndef YM_FB_CLIP_HI_HZ
+#define YM_FB_CLIP_HI_HZ    1800
+#endif
+#ifndef YM_FB_CLIP_RATE
+#define YM_FB_CLIP_RATE     30000
+#endif
+
 struct Ym2203Fm;
 
 // 初期化(clock = 入力クロック Hz、rate = 出力のサンプリング周波数 Hz)

@@ -250,8 +250,8 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
     }
     case 0x34: s.p34 = v; break;
     case 0x35: s.p35 = v; if (v & 0x80) s.vramSel = 3; updateMap(); break;
-    // 40h〜43h は同じ(アドレスのデコードが A2 から上だけ)。ミルキーウェイは「PC-8801mkII」を選ぶと
-    // 41h の bit7(SING)で曲を鳴らす(OUT (C) で C を INC/DEC するだけでポートを替える書き方)
+    // 40h〜43h は同じ(アドレスのデコードが A2 から上だけ。未確認の情報)。ミルキーウェイは
+    // 「PC-8801mkII」を選ぶと 41h の bit7(SING)で曲を鳴らす
     case 0x40: case 0x41: case 0x42: case 0x43: {
       uint8_t old = s.p40;
       s.p40 = v;

@@ -260,9 +260,8 @@ class OpnGenerator : public fabgl::WaveformGenerator {
   int32_t  dcPrev = 0, dcOut = 0;                  // 直流を取る1次ハイパス(約10Hz)
   // FM の高音の補正(1次ローパス、y += 0.78 × (x − y)。4kHz −2.3dB、8kHz −3.9dB)。
   // 16384Hz で計算した FM は 8kHz を超える倍音・FB のノイズが折り返して、2kHz より上がチップ
-  // (約 55kHz で計算して 7.5kHz で帯域制限した音)より 2〜5dB 強い。Ys2・アルファ・Daiva・LastArmageddon の
-  // 比較で、帯域ごとの差が 1/2〜1/3 になる強さ。0 にすると補正なし
-  #define FM_TREBLE_FIX 200
+  // (約 55kHz で計算して 7.5kHz で帯域制限した音)より 2〜5dB 強い。0 にすると補正なし
+  #define FM_TREBLE_FIX 320
   int32_t  fmLp = 0;
   // ---- ビープ(2.4kHz の矩形波)と SING ----
   uint32_t beepPhase = 0, beepStep = 0;

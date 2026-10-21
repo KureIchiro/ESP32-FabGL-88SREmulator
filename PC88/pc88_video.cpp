@@ -48,6 +48,10 @@ void pc88VideoPaletteChanged() {
 //  CRTC(§5.2)
 // ---------------------------------------------------------------------------
 enum { CMD_NONE = 0xFF, CMD_RESET = 0, CMD_CURSOR = 4 };
+// 今の属性(色・装飾)。行をまたいでもフレームをまたいでも持ち越し、CRTC のリセットで白・装飾なしに戻る(M88)。
+// ヴァリス2 のデモは最下行の (80h,00)(=0 桁に 1 つめの値 18h)で黒のセミグラフィックにし、次のフレームの
+// 全部の行の FFh(80 桁より右の 50h の桁は効かない)を黒の四角にして、グラフィックの描きかけを隠す
+static uint8_t  carryColor = 0xE8, carryDeco = 0;
 
 static void crtcApplyParams() {
   Pc88Crtc &c = pc88.crtc;
@@ -78,7 +82,7 @@ void pc88CrtcWrite(int port, uint8_t v) {
   Pc88Crtc &c = pc88.crtc;
   if (port == 0x51) {                       // コマンド
     switch (v >> 5) {
-      case 0: c.cmd = CMD_RESET; c.pcnt = 0; c.ve = false; break;
+      case 0: c.cmd = CMD_RESET; c.pcnt = 0; c.ve = false; carryColor = 0xE8; carryDeco = 0; break;
       case 1: c.ve = true; c.reverse = (v & 1) != 0; c.cmd = CMD_NONE; break;
       case 2: c.intMask = v & 3; if (!(v & 1)) { c.status = 0; c.ve = false; } c.cmd = CMD_NONE; break;
       case 4: c.cursorOn = (v & 1) != 0; c.cmd = CMD_CURSOR; c.pcnt = 0; break;
@@ -131,7 +135,6 @@ static int      dispRow;                   // 今描いている画面の文字�
 static bool     textOn;                    // このフレームはテキストを出す
 static uint16_t dmaPtr;
 static int      dmaLeft;
-static uint8_t  carryColor, carryDeco;     // 前の行から持ち越す属性
 static uint32_t rowHash;                   // 今の文字行の中身(文字・色・装飾)をまとめた値
 static bool     rowBlink;                  // 今の文字行に点滅の文字がある
 // 何かが描かれうる桁の一覧(空白の文字で、反転・上線・下線の無い桁は入れない)。
@@ -212,8 +215,6 @@ void pc88VideoFrameStart() {
   dmaPtr = s.dmac.addr[2];
   dmaLeft = (s.dmac.count[2] & 0x3FFF) + 1;
   curRow = -1;
-  carryColor = 0xE8;                        // フレームの始めは白・装飾なし
-  carryDeco = 0;
   // 表示期間は CRTC の L×R ラスタ(グラフィックも)。その下は枠(黒)で、VRTC もそこから
   // [MAME upd3301 recompute_parameters visarea / update_vrtc_timer][M88 CRTC screenheight・ClearText のマスク]
   int ras = c.l * c.r;
@@ -234,6 +235,7 @@ void pc88VideoReset() {
   s.crtc.cmd = CMD_NONE;
   curRow = -1;
   textOn = false;
+  carryColor = 0xE8; carryDeco = 0;
   loadFont();
   pc88VideoPaletteChanged();
   videoGen++;
