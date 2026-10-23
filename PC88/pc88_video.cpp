@@ -25,13 +25,39 @@ uint32_t pc88LinesDrawn;                   // 実際に描いた行の数(FRAME 
 static PC88_DRAM uint32_t lineKey[PC88_SCREEN_H];
 static volatile uint32_t videoGen = 1;
 void pc88VideoInvalidate() { videoGen++; }
+// グラフィックのパレットが変わったときは、変わった色を使っている行だけ描き直す(2026-10-22。X1 と同じ)。
+// シルフィード・テグザー・シーナは一部の色だけを何フレームかごとに書き換えていて、前はそのたびに
+// 200 行全部を描き直していた(2400 フレーム中 シルフィード 819 回、テグザー 631 回、シーナ 238 回)。
+// 色ごとに世代を持ち、行には描いたときに使ったグラフィックの色(8bit)とその色の世代をまとめた値を覚えておく。
+// 背景色が変わったとき・pc88VideoInvalidate のときは今までどおり全部
+static uint32_t colorGen[8], colorGenCnt = 0;
+static PC88_DRAM uint8_t  lineColors[PC88_SCREEN_H];   // 前に描いたときに使っていたグラフィックの色(bit c = 色 c)
+static PC88_DRAM uint32_t lineColorKey[PC88_SCREEN_H];
+static PC88_DRAM uint8_t  pairColors[64];              // 2 ドットの色番号 → 色のビット
+static inline uint32_t colorKey(uint8_t mask) {
+  uint32_t k = 0;
+  for (int c = 0; mask; c++, mask >>= 1) if (mask & 1) k = k * 0x01000193u + colorGen[c];
+  return k;
+}
+// 色を数えるのは、最近パレットが変わったとき(PALTRACK_FRAMES フレームのあいだ)だけ(2026-10-23)。
+// 毎回数えると 1 行の描画が 3〜4 割重くなり、パレットをほとんど変えないシーナが前より遅くなった(実機)。
+// 数えていない行は「全部の色を使う」扱い(0xFF)なので、パレットが変わった最初の 1 回は今までどおり全部描き直す
+static const uint16_t PALTRACK_FRAMES = 120;
+static uint16_t palTrack = 0;
+static PC88_DRAM uint32_t lineColorStamp[PC88_SCREEN_H];   // その行を描いたときの colorGenCnt(同じなら色は変わっていない)
+static inline bool colorsUnchanged(int y) {
+  if (lineColorStamp[y] == colorGenCnt) return true;
+  if (colorKey(lineColors[y]) != lineColorKey[y]) return false;
+  lineColorStamp[y] = colorGenCnt;
+  return true;
+}
 
 void pc88VideoPaletteChanged() {
   Pc88State &s = pc88;
   bool changed = false;
   for (int i = 0; i < 8; i++) {
     uint8_t p = pc88NativeColor(s.pal[i][1], s.pal[i][2], s.pal[i][0]);
-    changed |= (p != palNative[i]);
+    if (p != palNative[i]) { colorGen[i] = ++colorGenCnt; palTrack = PALTRACK_FRAMES; }   // その色を使う行だけ描き直す
     palNative[i] = p;
     textNative[i] = pc88NativeColor((i & 2) ? 7 : 0, (i & 4) ? 7 : 0, (i & 1) ? 7 : 0);
   }
@@ -210,6 +236,7 @@ static void fetchRow() {
 
 void pc88VideoFrameStart() {
   Pc88State &s = pc88;
+  if (palTrack) palTrack--;
   Pc88Crtc &c = s.crtc;
   textOn = c.ve && (s.dmac.mode & 0x04) && !(s.p53 & 1);
   dmaPtr = s.dmac.addr[2];
@@ -269,6 +296,7 @@ static void buildTables() {
     uint32_t w = 0;
     for (int j = 0; j < 4; j++) w |= (uint32_t)(((v >> (7 - 2 * j)) & 1) | (((v >> (6 - 2 * j)) & 1) << 3)) << (8 * j);
     spair[v] = w;
+    if (v < 64) pairColors[v] = (uint8_t)((1 << (v & 7)) | (1 << (v >> 3)));
   }
   for (int i = 0; i < 80; i++) allCols[i] = (uint8_t)i;
   tablesReady = true;
@@ -327,6 +355,7 @@ void PC88_FAST pc88RenderLine(int y) {
     uint32_t bk = (videoGen * 0x9E3779B1u) ^ 0x6B43A9B5u;
     if (bk == lineKey[y]) return;
     lineKey[y] = bk;
+    lineColors[y] = 0; lineColorKey[y] = 0; lineColorStamp[y] = colorGenCnt;
     pc88LinesDrawn++;
     const uint32_t blackW = blackNative * 0x01010101u;
     for (int i = 0; i < 160; i++) dst[i] = blackW;
@@ -367,7 +396,7 @@ void PC88_FAST pc88RenderLine(int y) {
   }
   bool gDirty = pc88GvDirty[y] != 0;
   pc88GvDirty[y] = 0;
-  if (!mono400 && !(gOn && gDirty) && key == lineKey[y]) return;
+  if (!mono400 && !(gOn && gDirty) && key == lineKey[y] && colorsUnchanged(y)) return;
   lineKey[y] = mono400 ? key ^ 1 : key;      // 640×400 は GVRAM の行と画面の行が合わないので毎回描く
   pc88LinesDrawn++;
   // テキストを重ねる桁: 画面全体の反転かカーソルのある行は全部の桁、それ以外は何か描かれうる桁だけ
@@ -382,14 +411,36 @@ void PC88_FAST pc88RenderLine(int y) {
 
   // ---- グラフィック(GVRAM は PSRAM にあるので、1 行分ずつ内部 RAM に写してから使う) ----
   uint8_t lb[80], lr[80], lg[80];
+  uint8_t cm = 0;                            // この行で使うグラフィックの色(カラーのときだけ。パレットを使うのはそこだけ)
   if (gOn && gColor) {
     memcpy(lb, s.mem.gvram[0] + y * 80, 80);
     memcpy(lr, s.mem.gvram[1] + y * 80, 80);
     memcpy(lg, s.mem.gvram[2] + y * 80, 80);
-    for (int cx = 0; cx < 80; cx++) {
-      uint32_t i = spair[lb[cx]] | (spair[lr[cx]] << 1) | (spair[lg[cx]] << 2);   // 4 組の色番号
-      out[cx * 2]     = pairW[(i >> 8) & 63] | ((uint32_t)pairW[i & 63] << 16);
-      out[cx * 2 + 1] = pairW[i >> 24] | ((uint32_t)pairW[(i >> 16) & 63] << 16);
+    if (palTrack) {                          // 最近パレットが変わった: 使っている色も調べる
+      // 色番号の OR と AND をとるだけにして(1 桁 2 演算)、あとで「その OR・AND と合う色」を使う色とみなす。
+      // 実際の色より多めになることはあるが、少なくはならない(色を 1 つずつ数えると 1 行が 3〜4 割重かった)
+      uint32_t orw = 0, andw = 0xFFFFFFFFu;
+      for (int cx = 0; cx < 80; cx++) {
+        uint32_t i = spair[lb[cx]] | (spair[lr[cx]] << 1) | (spair[lg[cx]] << 2);   // 4 組の色番号
+        orw |= i; andw &= i;
+        out[cx * 2]     = pairW[(i >> 8) & 63] | ((uint32_t)pairW[i & 63] << 16);
+        out[cx * 2 + 1] = pairW[i >> 24] | ((uint32_t)pairW[(i >> 16) & 63] << 16);
+      }
+      uint32_t ob = 0, ab = 7;
+      for (int j = 0; j < 4; j++) {
+        uint32_t x = (orw >> (8 * j)) & 63, a = (andw >> (8 * j)) & 63;
+        ob |= (x & 7) | (x >> 3);
+        ab &= (a & 7) & (a >> 3);
+      }
+      cm = 0;
+      for (int col = 0; col < 8; col++) if (!(col & ~ob) && (col & ab) == ab) cm |= (uint8_t)(1 << col);
+    } else {
+      for (int cx = 0; cx < 80; cx++) {
+        uint32_t i = spair[lb[cx]] | (spair[lr[cx]] << 1) | (spair[lg[cx]] << 2);   // 4 組の色番号
+        out[cx * 2]     = pairW[(i >> 8) & 63] | ((uint32_t)pairW[i & 63] << 16);
+        out[cx * 2 + 1] = pairW[i >> 24] | ((uint32_t)pairW[(i >> 16) & 63] << 16);
+      }
+      cm = 0xFF;                             // 数えていない = 全部の色を使う扱い
     }
   } else if (gOn) {                         // 白黒: 1 のドットはその桁のテキストの色(カラー属性のとき)か白
     uint8_t mask53 = s.p53;
@@ -417,6 +468,8 @@ void PC88_FAST pc88RenderLine(int y) {
     const uint32_t blackW = blackNative * 0x01010101u;
     for (int i = 0; i < 160; i++) out[i] = blackW;
   }
+
+  lineColors[y] = cm; lineColorKey[y] = colorKey(cm); lineColorStamp[y] = colorGenCnt;
 
   // ---- テキストを重ねる(黒の文字も不透明) ----
   if (!overlay) return;

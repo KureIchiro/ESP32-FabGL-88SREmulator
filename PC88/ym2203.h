@@ -28,7 +28,7 @@
 #define YM_FB_CLIP_ENABLE   1
 #endif
 #ifndef YM_FB_CLIP_MAX
-//#define YM_FB_CLIP_MAX      256     // 4.0 段
+#define YM_FB_CLIP_MAX      256     // 4.0 段
 #define YM_FB_CLIP_MAX      192     // 3.0 段
 #endif
 #ifndef YM_FB_CLIP_MAX_LO
@@ -36,11 +36,10 @@
 #define YM_FB_CLIP_MAX_LO   128     // 2.0 段(低い音)
 #endif
 #ifndef YM_FB_CLIP_NOISE
-//#define YM_FB_CLIP_NOISE    352     // 5.5 段
-#define YM_FB_CLIP_NOISE    384      // 6.0 段
+#define YM_FB_CLIP_NOISE    352     // 5.5 段
 #endif
 #ifndef YM_FB_CLIP_LO_HZ
-#define YM_FB_CLIP_LO_HZ    400
+#define YM_FB_CLIP_LO_HZ    300
 #endif
 #ifndef YM_FB_CLIP_HI_HZ
 #define YM_FB_CLIP_HI_HZ    1800
