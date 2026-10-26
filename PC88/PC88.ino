@@ -1106,8 +1106,8 @@ void setup() {
   for (int i = 0; i < 4; i++) {
     int pg = order[i];
     uint8_t *p = nullptr;
-    // if (heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL) >= 0x4000 + RESERVE)
-    //   p = (uint8_t *)heap_caps_malloc(0x4000, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL) >= 0x4000 + RESERVE)
+      p = (uint8_t *)heap_caps_malloc(0x4000, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     if (!p) p = (uint8_t *)ps_malloc(0x4000);
     mem.ram_page[pg] = p;
   }
