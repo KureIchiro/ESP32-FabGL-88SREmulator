@@ -20,7 +20,6 @@
 #endif
 #include "Z80.h"
 #include "Tables.h"
-/* プレフィックス命令(CB/ED/DD/FD)の処理はフラッシュに置く(ExecZ80 に埋め込まれると IRAM に入りきらない) */
 #if defined(__GNUC__)
 #define Z80_NOINLINE __attribute__((noinline))
 #else
@@ -29,20 +28,12 @@
 #include <stdio.h>
 #include <esp_attr.h>
 
-/** INLINE ***************************************************/
-/** C99 standard has "inline", but older compilers used     **/
-/** __inline for the same purpose.                          **/
-/*************************************************************/
 #ifdef __C99__
 #define INLINE static inline
 #else
 #define INLINE static __inline
 #endif
 
-/** System-Dependent Stuff ***********************************/
-/** This is system-dependent code put here to speed things  **/
-/** up. It has to stay inlined to be fast.                  **/
-/*************************************************************/
 #ifdef COLEM
 #define RdZ80 RDZ80
 extern byte *ROMPage[];
@@ -69,7 +60,6 @@ extern byte *RAM[];
 INLINE byte OpZ80(zword A) { return(RAM[A>>13][A&0x1FFF]); }
 #endif
 
-/* 必ず展開する(Arduino の既定 -Os だと関数のまま残り、IRAM の ExecZ80 からフラッシュの関数を呼んでしまう) */
 #if defined(__GNUC__)
 #define Z80_FORCEINLINE static inline __attribute__((always_inline))
 #else
@@ -77,8 +67,6 @@ INLINE byte OpZ80(zword A) { return(RAM[A>>13][A&0x1FFF]); }
 #endif
 
 #ifdef PC88_SUB
-/* ディスクユニット(PC-80S31)の Z80。z80sub.c が関数名を付け替えてこのファイルを取り込む。    */
-/* メモリは pc88_disk.cpp の4KB単位の表を直接引く(ROM への書き込みは捨て場所を指している)。 */
 #define FAST_RDOP
 #define RdZ80 RDZ80
 #define WrZ80 WRZ80
@@ -87,8 +75,6 @@ Z80_FORCEINLINE byte OpZ80(zword A) { return(pc88s_rd_map[A>>12][A&0x0FFF]); }
 Z80_FORCEINLINE byte RdZ80(zword A) { return(pc88s_rd_map[A>>12][A&0x0FFF]); }
 Z80_FORCEINLINE void WrZ80(zword A,byte V) { pc88s_wr_map[A>>12][A&0x0FFF]=V; }
 #else
-/* 本体の Z80。メモリは pc88_core.cpp の1KB単位の表(pc88_rd_map / pc88_wr_map)を直接引く。 */
-/* 表が nullptr のページ(V2 の ALU を通す GVRAM など)だけ pc88_core.cpp の関数を呼ぶ。       */
 #define FAST_RDOP
 #define RdZ80 RDZ80
 #define WrZ80 WRZ80
@@ -106,23 +92,13 @@ Z80_FORCEINLINE void WrZ80(zword A,byte V)
   byte *P=pc88_wr_map[A>>10];
   if(P) P[A&0x03FF]=V; else WrZ80Slow(A,V);
 }
-/* EI の次の命令のあとで受け付ける割込み(pc88_core.cpp)。あればベクタ、無ければ -1。      */
-/* 割込みはふだん1行ごとに調べるが、EI〜DI の短い間しか割込みを許さないループ(N88-BASIC の */
-/* キー入力待ちなど)では行の終わりがいつも DI の中に当たって受け付けられないことがある。    */
 int pc88IrqTake(void);
 #define Z80_AFTER_EI_IRQ
 #endif
 
-/* ExecZ80 と CodesED の置き場所。本体は IRAM、ディスクユニットはフラッシュ(z80sub.c が空にする)。
-   CodesED(約5KB)も IRAM に置く: ALU で GVRAM に描くゲームは LDI を多用し、本体の Z80 の時間の
-   1〜2割が ED 命令になる(ハーネスで計測: スペースハリアー 17〜27%、シーナ 約11%)。
-   フラッシュだとキャッシュ(CB/DD/FD やディスクユニットのコードと共用)から追い出されるたびに遅くなる。
-   CodesCB(約10KB)も試したが効果が無かった(下の PC88_CB_IN_IRAM)。DD/FD(各 約19KB)は入らない */
 #ifndef Z80_EXEC_ATTR
 #define Z80_EXEC_ATTR IRAM_ATTR
 #endif
-/* CodesCB を IRAM に置くか(1 = 置く、0 = フラッシュ)。実機で比べたら ED だけのほうが速かった
-   (2026-10-16 FRAME ログ: シルフィード z80 6.0〜6.2ms → CB も置くと 6.1〜6.8ms)ので 0 */
 #define PC88_CB_IN_IRAM 0
 #if PC88_CB_IN_IRAM
 #define Z80_CB_ATTR Z80_EXEC_ATTR
@@ -130,16 +106,10 @@ int pc88IrqTake(void);
 #define Z80_CB_ATTR
 #endif
 
-/** FAST_RDOP ************************************************/
-/** With this #define not present, RdZ80() should perform   **/
-/** the functions of OpZ80().                               **/
-/*************************************************************/
 #ifndef FAST_RDOP
 #define OpZ80(A) RdZ80(A)
 #endif
 
-/* PC と残りサイクル数の置き場所。ExecZ80 の中ではローカル変数(CPU のレジスタ)に置き換え、   */
-/* 関数を呼ぶとき(プレフィックス命令・割込み・I/O)だけ R と合わせる。ほかの関数では R のまま。 */
 #define RPC (R->PC)
 #define RIC (R->ICount)
 #define Z80_IOSYNC() ((void)0)
@@ -411,7 +381,7 @@ static Z80_NOINLINE void Z80_CB_ATTR CodesCB(register Z80 *R)
   register byte I;
 
   I=OpZ80(R->PC.W++);
-  R->R++;                                   /* 2 回目の M1 */
+  R->R++;
   R->ICount-=CyclesCB[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[0]++; z80PfxCycles[0]+=CyclesCB[I]; }
@@ -481,11 +451,11 @@ static Z80_NOINLINE void Z80_EXEC_ATTR CodesED(register Z80 *R)
   register pair J;
 
   I=OpZ80(R->PC.W++);
-  R->R++;                                   /* 2 回目の M1 */
+  R->R++;
   R->ICount-=CyclesED[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80EdCount[256], z80EdCycles, z80LdiDst[16], z80LdiSrc[16]; z80EdCount[I]++; z80EdCycles+=CyclesED[I];
-    if(I==0xA0||I==0xB0) { z80LdiDst[R->DE.W>>12]++; z80LdiSrc[R->HL.W>>12]++; } }   /* PC のハーネスだけ: ED 命令の統計(LDI/LDIR の転送元・先 4KB 単位) */
+    if(I==0xA0||I==0xB0) { z80LdiDst[R->DE.W>>12]++; z80LdiSrc[R->HL.W>>12]++; } }
 #endif
   switch(I)
   {
@@ -509,7 +479,7 @@ static Z80_NOINLINE void CodesDD(register Z80 *R)
 
 #define XX IX
   I=OpZ80(R->PC.W++);
-  R->R++;                                   /* 2 回目の M1(DD CB d op の CB もここ。d と op は M1 ではない) */
+  R->R++;
   R->ICount-=CyclesXX[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[1]++; z80PfxCycles[1]+=CyclesXX[I]; }
@@ -540,7 +510,7 @@ static Z80_NOINLINE void CodesFD(register Z80 *R)
 
 #define XX IY
   I=OpZ80(R->PC.W++);
-  R->R++;                                   /* 2 回目の M1(DD CB d op の CB もここ。d と op は M1 ではない) */
+  R->R++;
   R->ICount-=CyclesXX[I];
 #if defined(Z80_OPSTATS) && !defined(PC88_SUB)
   { extern unsigned z80PfxCount[3], z80PfxCycles[3]; z80PfxCount[2]++; z80PfxCycles[2]+=CyclesXX[I]; }
@@ -563,11 +533,6 @@ static Z80_NOINLINE void CodesFD(register Z80 *R)
 #undef XX
 }
 
-/** ResetZ80() ***********************************************/
-/** This function can be used to reset the register struct  **/
-/** before starting execution with Z80(). It sets the       **/
-/** registers to their supposed initial values.             **/
-/*************************************************************/
 void ResetZ80(Z80 *R)
 {
   R->PC.W     = 0x0000;
@@ -593,27 +558,20 @@ void ResetZ80(Z80 *R)
   JumpZ80(R->PC.W);
 }
 
-/** ExecZ80() ************************************************/
-/** This function will execute given number of Z80 cycles.  **/
-/** It will then return the number of cycles left, possibly **/
-/** negative, and current register values in R.             **/
-/*************************************************************/
 #ifdef EXECZ80
 int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
 {
   register byte I;
   register pair J;
-  /* PC と残りサイクル数はローカル変数に置く(毎命令の R->PC / R->ICount の読み書きをなくす)。 */
-  /* R に戻すのは、R を見る関数を呼ぶとき(プレフィックス命令・割込み・I/O・デバッガ)と戻るとき */
   pair LPC;
   int LIC;
-  unsigned LR;                                             /* R(M1 の回数)もローカルで数える */
+  unsigned LR;
 #undef RPC
 #undef RIC
 #undef Z80_IOSYNC
 #define RPC LPC
 #define RIC LIC
-#define Z80_IOSYNC() (R->ICount=LIC)                       /* I/O は R->ICount でライン内の位置を見る */
+#define Z80_IOSYNC() (R->ICount=LIC)
 #define Z80_SAVE()   (R->PC=LPC,R->ICount=LIC,R->R=(byte)LR)
 #define Z80_LOAD()   (LPC=R->PC,LIC=R->ICount,LR=R->R)
 
@@ -624,9 +582,7 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
     while(LIC>0)
     {
 #ifdef DEBUG
-      /* Turn tracing on when reached trap address */
       if(LPC.W==R->Trap) R->Trace=1;
-      /* Call single-step debugger, exit if requested */
       if(R->Trace)
       {
         Z80_SAVE();
@@ -634,13 +590,10 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
       }
 #endif
 
-      /* Read opcode and count cycles */
       I=OpZ80(LPC.W++);
       LR++;
-      /* Count cycles */
       LIC-=Cycles[I];
 
-      /* Interpret opcode */
       switch(I)
       {
 #include "Codes.h"
@@ -651,15 +604,11 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
       }
     }
 
-    /* Unless we have come here after EI, exit */
     if(!(R->IFF&IFF_EI)) { Z80_SAVE(); return(LIC); }
     else
     {
-      /* Done with AfterEI state */
       R->IFF=(R->IFF&~IFF_EI)|IFF_1;
-      /* Restore the ICount */
       LIC+=R->IBackup-1;
-      /* Interrupt CPU if needed */
 #ifdef Z80_AFTER_EI_IRQ
       {
         int V=pc88IrqTake();
@@ -684,59 +633,40 @@ int Z80_EXEC_ATTR ExecZ80(register Z80 *R,register int RunCycles)
 #define RIC (R->ICount)
 #define Z80_IOSYNC() ((void)0)
 }
-#endif /* EXECZ80 */
+#endif
 
-/** IntZ80() *************************************************/
-/** This function will generate interrupt of given vector.  **/
-/*************************************************************/
 void IntZ80(Z80 *R,zword Vector)
 {
-  /* If HALTed, take CPU off HALT instruction */
   if(R->IFF&IFF_HALT) { R->PC.W++;R->IFF&=~IFF_HALT; }
-  
+
   if((R->IFF&IFF_1)||(Vector==INT_NMI))
   {
-    R->R++;                                   /* 割込みの応答も M1 */
-    /* Save PC on stack */
+    R->R++;
     M_PUSH(PC);
 
-    /* Automatically reset IRequest if needed */
     if(R->IAutoReset&&(Vector==R->IRequest)) R->IRequest=INT_NONE;
 
-    /* If it is NMI... */
     if(Vector==INT_NMI)
     {
-      /* Clear IFF1 */
       R->IFF&=~(IFF_1|IFF_EI);
-      /* Jump to hardwired NMI vector */
       R->PC.W=0x0066;
       JumpZ80(0x0066);
-      /* Done */
       return;
     }
 
-    /* Further interrupts off */
     R->IFF&=~(IFF_1|IFF_2|IFF_EI);
 
-    /* If in IM2 mode... */
     if(R->IFF&IFF_IM2)
     {
-      /* Make up the vector address */
       Vector=(Vector&0xFF)|((zword)(R->I)<<8);
-      /* Read the vector */
       R->PC.B.l=RdZ80(Vector++);
       R->PC.B.h=RdZ80(Vector);
       JumpZ80(R->PC.W);
-      /* Done */
       return;
     }
 
-    /* If in IM1 mode, just jump to hardwired IRQ vector */
     if(R->IFF&IFF_IM1) { R->PC.W=0x0038;JumpZ80(0x0038);return; }
 
-    /* If in IM0 mode... */
-
-    /* Jump to a vector */
     switch(Vector)
     {
       case INT_RST00: R->PC.W=0x0000;JumpZ80(0x0000);break;
@@ -751,11 +681,6 @@ void IntZ80(Z80 *R,zword Vector)
   }
 }
 
-/** RunZ80() *************************************************/
-/** This function will run Z80 code until an LoopZ80() call **/
-/** returns INT_QUIT. It will return the PC at which        **/
-/** emulation stopped, and current register values in R.    **/
-/*************************************************************/
 #ifdef RUNZ80
 zword RunZ80(Z80 *R)
 {
@@ -765,9 +690,7 @@ zword RunZ80(Z80 *R)
   for(;;)
   {
 #ifdef DEBUG
-    /* Turn tracing on when reached trap address */
     if(R->PC.W==R->Trap) R->Trace=1;
-    /* Call single-step debugger, exit if requested */
     if(R->Trace)
       if(!DebugZ80(R)) return(R->PC.W);
 #endif
@@ -784,46 +707,37 @@ zword RunZ80(Z80 *R)
       case PFX_DD: CodesDD(R);break;
     }
 
-    /* If cycle counter expired... */
     if(R->ICount<=0)
     {
-      /* If we have come after EI, get address from IRequest */
-      /* Otherwise, get it from the loop handler             */
       if(R->IFF&IFF_EI)
       {
-        R->IFF=(R->IFF&~IFF_EI)|IFF_1; /* Done with AfterEI state */
-        R->ICount+=R->IBackup-1;       /* Restore the ICount      */
+        R->IFF=(R->IFF&~IFF_EI)|IFF_1;
+        R->ICount+=R->IBackup-1;
 
-        /* Call periodic handler or set pending IRQ */
         if(R->ICount>0) J.W=R->IRequest;
         else
         {
-          J.W=LoopZ80(R);        /* Call periodic handler    */
-          R->ICount+=R->IPeriod; /* Reset the cycle counter  */
-          if(J.W==INT_NONE) J.W=R->IRequest;  /* Pending IRQ */
+          J.W=LoopZ80(R);
+          R->ICount+=R->IPeriod;
+          if(J.W==INT_NONE) J.W=R->IRequest;
         }
       }
       else
       {
-        J.W=LoopZ80(R);          /* Call periodic handler    */
-        R->ICount+=R->IPeriod;   /* Reset the cycle counter  */
-        if(J.W==INT_NONE) J.W=R->IRequest;    /* Pending IRQ */
+        J.W=LoopZ80(R);
+        R->ICount+=R->IPeriod;
+        if(J.W==INT_NONE) J.W=R->IRequest;
       }
 
-      if(J.W==INT_QUIT) return(R->PC.W); /* Exit if INT_QUIT */
-      if(J.W!=INT_NONE) IntZ80(R,J.W);   /* Int-pt if needed */
+      if(J.W==INT_QUIT) return(R->PC.W);
+      if(J.W!=INT_NONE) IntZ80(R,J.W);
     }
   }
 
-  /* Execution stopped */
   return(R->PC.W);
 }
-#endif /* !RUNZ80 */
+#endif
 
-/** StepZ80() ************************************************/
-/** This function will execute a single Z80 opcode.         **/
-/** It will return the current register values in R.        **/
-/*************************************************************/
 #ifdef STEPZ80
 inline void IRAM_ATTR StepZ80(register Z80 *R)
 {
@@ -831,19 +745,14 @@ inline void IRAM_ATTR StepZ80(register Z80 *R)
   register pair J;
 
 #ifdef DEBUG
-      /* Turn tracing on when reached trap address */
       if(R->PC.W==R->Trap) R->Trace=1;
-      /* Call single-step debugger, exit if requested */
       if(R->Trace)
         if(!DebugZ80(R)) return(R->ICount);
 #endif
 
-      /* Read opcode and count cycles */
       I=OpZ80(R->PC.W++);
-      /* Count cycles */
       R->ICount-=Cycles[I];
 
-      /* Interpret opcode */
       switch(I)
       {
 #include "Codes.h"
@@ -853,16 +762,12 @@ inline void IRAM_ATTR StepZ80(register Z80 *R)
         case PFX_DD: CodesDD(R);break;
       }
 
-    /* Unless we have come here after EI, exit */
     if(!(R->IFF&IFF_EI)) return(R->ICount);
     else
     {
-      /* Done with AfterEI state */
       R->IFF=(R->IFF&~IFF_EI)|IFF_1;
-      /* Restore the ICount */
       R->ICount+=R->IBackup-1;
-      /* Interrupt CPU if needed */
       if((R->IRequest!=INT_NONE)&&(R->IRequest!=INT_QUIT)) IntZ80(R,R->IRequest);
     }
 }
-#endif /* STEPZ80 */
+#endif

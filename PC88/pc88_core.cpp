@@ -1,6 +1,5 @@
 // ============================================================================
 //  PC-8801mkIISR 本体: メモリの切り替え、I/O、割込み、カレンダ、OPN のタイマー
-//  仕様は PC88_REQUIREMENTS.md(§2 メモリ、§3 I/O、§4 割込み)
 // ============================================================================
 #ifdef ARDUINO
 #pragma GCC optimize("O3")
@@ -17,14 +16,10 @@ extern "C" {
   uint8_t RdZ80Slow(uint16_t a);
   void    WrZ80Slow(uint16_t a, uint8_t v);
 }
-static uint8_t romFF[0x400];                       // 無い ROM の代わり(FFh)
+static uint8_t romFF[0x400];
 
-// ---------------------------------------------------------------------------
-//  メモリの表(1KB 単位。Z80.c が直接引く)。§2
-// ---------------------------------------------------------------------------
 static inline uint8_t *ramPtr(uint32_t a) { return pc88.mem.ram_page[(a >> 14) & 3] + (a & 0x3FFF); }
 
-// C000h〜FFFFh のメイン側(F000h〜は高速モードで 32h bit4=0 なら TVRAM)
 static inline uint8_t *mainC000(uint32_t a) {
   if (a >= 0xF000 && pc88.highSpeed && !(pc88.p32 & 0x10)) return pc88.mem.tvram + (a & 0xFFF);
   return ramPtr(a);
@@ -32,34 +27,30 @@ static inline uint8_t *mainC000(uint32_t a) {
 
 static void updateMap() {
   Pc88State &s = pc88;
-  // 0000h〜7FFFh: 書き込みはいつも RAM
   for (int p = 0; p < 32; p++) {
     uint32_t a = (uint32_t)p << 10;
     uint8_t *rd;
-    if (s.p31 & 0x02) rd = ramPtr(a);                                   // 64KB RAM
-    else if (s.p31 & 0x04) rd = s.mem.n80rom ? s.mem.n80rom + a : romFF; // N-BASIC
-    else if (a >= 0x6000 && !(s.p71 & 1)) {                             // N88 拡張 ROM
+    if (s.p31 & 0x02) rd = ramPtr(a);
+    else if (s.p31 & 0x04) rd = s.mem.n80rom ? s.mem.n80rom + a : romFF;
+    else if (a >= 0x6000 && !(s.p71 & 1)) {
       uint8_t *e = s.mem.n88ext[s.p32 & 3];
       rd = e ? e + (a & 0x1FFF) : romFF;
     } else rd = s.mem.n88rom + a;
     pc88_rd_map[p] = rd;
     pc88_wr_map[p] = ramPtr(a);
   }
-  // 8000h〜83FFh: ROM モードのときはテキストウィンドウ(70h × 100h のメイン RAM)
   if (s.p31 & 0x06) {
     pc88_rd_map[32] = pc88_wr_map[32] = ramPtr(0x8000);
   } else {
     uint32_t wa = (uint32_t)s.p70 << 8;
-    uint8_t *w = (wa & 0x3FF) ? nullptr : ramPtr(wa);                   // 1KB に揃っていなければ関数で
+    uint8_t *w = (wa & 0x3FF) ? nullptr : ramPtr(wa);
     pc88_rd_map[32] = pc88_wr_map[32] = w;
   }
   for (int p = 33; p < 48; p++) pc88_rd_map[p] = pc88_wr_map[p] = ramPtr((uint32_t)p << 10);
-  // C000h〜FFFFh
-  if (s.p32 & 0x40) s.vramSel = 3;                                      // ALU モード中は 5Ch〜5Eh の選択は無効
-  // GVRAM への書き込みは表に載せず WrZ80Slow を通す(書き換えた行を描画に知らせるため)
+  if (s.p32 & 0x40) s.vramSel = 3;
   for (int p = 48; p < 64; p++) {
     uint32_t a = (uint32_t)p << 10;
-    if ((s.p32 & 0x40) && (s.p35 & 0x80)) {                             // ALU を通す
+    if ((s.p32 & 0x40) && (s.p35 & 0x80)) {
       pc88_rd_map[p] = pc88_wr_map[p] = nullptr;
     } else if (s.vramSel < 3) {
       pc88_rd_map[p] = s.mem.gvram[s.vramSel] + (a & 0x3FFF);
@@ -70,7 +61,6 @@ static void updateMap() {
   }
 }
 
-// ALU(§6.4)
 static uint8_t aluRead(uint16_t off) {
   Pc88State &s = pc88;
   for (int i = 0; i < 3; i++) s.aluLatch[i] = s.mem.gvram[i][off];
@@ -104,11 +94,11 @@ extern "C" uint8_t PC88_FAST RdZ80Slow(uint16_t a) {
     if ((s.p32 & 0x40) && (s.p35 & 0x80)) return aluRead(a & 0x3FFF);
     return s.vramSel < 3 ? s.mem.gvram[s.vramSel][a & 0x3FFF] : *mainC000(a);
   }
-  uint32_t wa = (((uint32_t)pc88.p70 << 8) + (a & 0x3FF)) & 0xFFFF;   // ずれたウィンドウ
+  uint32_t wa = (((uint32_t)pc88.p70 << 8) + (a & 0x3FF)) & 0xFFFF;
   return *ramPtr(wa);
 }
 extern "C" void PC88_FAST WrZ80Slow(uint16_t a, uint8_t v) {
-  if (a >= 0xC000) {                                                   // GVRAM(ALU / 1 プレーン)
+  if (a >= 0xC000) {
     Pc88State &s = pc88;
     uint16_t off = a & 0x3FFF;
     if ((s.p32 & 0x40) && (s.p35 & 0x80)) aluWrite(off, v);
@@ -121,9 +111,6 @@ extern "C" void PC88_FAST WrZ80Slow(uint16_t a, uint8_t v) {
   *ramPtr(wa) = v;
 }
 
-// ---------------------------------------------------------------------------
-//  割込み(§4): レベル 0 RXRDY / 1 VRTC / 2 1/600 秒 / 4 OPN。ベクタ = レベル × 2
-// ---------------------------------------------------------------------------
 static bool levelEnabled(int l) {
   switch (l) {
     case 0: return (pc88.irqMaskE6 & 4) != 0;
@@ -144,25 +131,21 @@ uint8_t pc88IrqAck() {
   for (int l = 0; l < pc88.levelLimit; l++)
     if (pc88.irqReq & (1 << l)) {
       pc88.irqReq &= (uint8_t)~(1 << l);
-      pc88.canInt = false;                           // E4h を書くまで次は出さない
+      pc88.canInt = false;
       return (uint8_t)(l * 2);
     }
   return 0;
 }
-// Z80.c が EI の次の命令のあとで呼ぶ: 受け付けられる割込みがあればベクタ、無ければ -1
 extern "C" int PC88_FAST pc88IrqTake(void) { return pc88IrqPending() ? pc88IrqAck() : -1; }
 
-// ---------------------------------------------------------------------------
-//  カレンダ μPD1990A(§3.1): 10h でコマンドとデータ、40h bit1 = STB、bit2 = CLK、IN 40h bit4 = データ
-// ---------------------------------------------------------------------------
 static struct { uint8_t cmd, din, mode; uint64_t sr; bool cdo, stb, clk; } cal;
 static struct { int year, mon, day, wday, hour, min, sec; } now = { 2026, 10, 9, 5, 12, 0, 0 };
 static uint32_t calFrames;
 static inline uint8_t bcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
 static inline int unbcd(uint8_t v) { return (v >> 4) * 10 + (v & 15); }
-static void calTick() {                             // 1 フレームごと(55.4Hz)
+static void calTick() {
   static const int mdays[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-  if (++calFrames * 1000u < 55416u) return;          // 1 秒 = 55.416 フレーム
+  if (++calFrames * 1000u < 55416u) return;
   calFrames = 0;
   if (++now.sec < 60) return;
   now.sec = 0;
@@ -178,15 +161,15 @@ static void calTick() {                             // 1 フレームごと(55.4
   now.mon = 1;
   now.year++;
 }
-static void calStrobe() {                           // STB の立ち上がり: コマンドを実行
+static void calStrobe() {
   cal.mode = cal.cmd;
   switch (cal.cmd) {
-    case 2:                                         // 時刻を合わせる(シフトレジスタから)
+    case 2:
       now.sec = unbcd((uint8_t)cal.sr); now.min = unbcd((uint8_t)(cal.sr >> 8)); now.hour = unbcd((uint8_t)(cal.sr >> 16));
       now.day = unbcd((uint8_t)(cal.sr >> 24)); now.wday = (int)((cal.sr >> 32) & 15); now.mon = (int)((cal.sr >> 36) & 15);
       if (now.mon < 1 || now.mon > 12) now.mon = 1;
       break;
-    case 3:                                         // 時刻を読む(秒 分 時 日 曜日(4) 月(4)、下位から)
+    case 3:
       cal.sr = (uint64_t)bcd(now.sec) | ((uint64_t)bcd(now.min) << 8) | ((uint64_t)bcd(now.hour) << 16) |
                ((uint64_t)bcd(now.day) << 24) | ((uint64_t)(now.wday & 15) << 32) | ((uint64_t)(now.mon & 15) << 36);
       cal.cdo = cal.sr & 1;
@@ -194,30 +177,25 @@ static void calStrobe() {                           // STB の立ち上がり: �
     default: break;
   }
 }
-static void calClock() {                            // CLK の立ち上がり: シフト(シフトモードのとき)
+static void calClock() {
   if (cal.mode != 1) return;
   cal.sr = (cal.sr >> 1) | ((uint64_t)(cal.din & 1) << 39);
   cal.cdo = cal.sr & 1;
 }
 
-// ---------------------------------------------------------------------------
-//  I/O(§3)
-// ---------------------------------------------------------------------------
 extern "C" uint8_t PC88_FAST pc88In(uint16_t port) {
   Pc88State &s = pc88;
   uint8_t p = (uint8_t)port;
   if (p < 0x10) return p < 0x0C ? pc88_key[p] : 0xFF;
   switch (p) {
-    case 0x20: case 0x22: case 0x24: case 0x26: case 0x28: case 0x2A: case 0x2C: case 0x2E: return 0x00;   // USART データ
-    case 0x21: case 0x23: case 0x25: case 0x27: case 0x29: case 0x2B: case 0x2D: case 0x2F: return 0x85;   // USART 状態(送信可)
+    case 0x20: case 0x22: case 0x24: case 0x26: case 0x28: case 0x2A: case 0x2C: case 0x2E: return 0x00;
+    case 0x21: case 0x23: case 0x25: case 0x27: case 0x29: case 0x2B: case 0x2D: case 0x2F: return 0x85;
     case 0x30: return s.dip30;
     case 0x31: return s.dip31;
     case 0x32: return s.p32;
     case 0x40: return (uint8_t)(0xC0 | (s.vrtc ? 0x20 : 0) | (cal.cdo ? 0x10 : 0) | (s.cfg.diskBoot && s.mem.diskrom ? 0 : 0x08) | 0x04);
-    case 0x44: return (uint8_t)(s.opnTimer.status & 3);                          // OPN の状態(busy=0)
-    // SSG のレジスタは CPU 側の写し(ssgShadow)から返す。音を作る側(コア1)のレジスタは書き込みの
-    // キューを処理してから変わるので、書いた直後に読み直す(R7 などを読み・変え・書く)ドライバに古い値を返していた
-    case 0x45: return s.opnAddr < 14 ? s.ssgShadow[s.opnAddr] : s.opnAddr < 0x10 ? pc88SsgRead(s.opnAddr) : 0x00;   // 14/15 = I/O ポート
+    case 0x44: return (uint8_t)(s.opnTimer.status & 3);
+    case 0x45: return s.opnAddr < 14 ? s.ssgShadow[s.opnAddr] : s.opnAddr < 0x10 ? pc88SsgRead(s.opnAddr) : 0x00;
     case 0x50: case 0x51: return pc88CrtcRead(p);
     case 0x5C: return (uint8_t)(0xF8 | (s.vramSel < 3 ? 1 << s.vramSel : 0));
     case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67: case 0x68:
@@ -244,27 +222,25 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
       uint8_t old = s.p32;
       s.p32 = v;
       if ((old ^ v) & 0x20) s.palDirty = true;
-      if ((old & 0x80) && !(v & 0x80) && ym2203TimerIrq(s.opnTimer)) request(4);   // OPN のマスク解除: IRQ が出ていれば要求
+      if ((old & 0x80) && !(v & 0x80) && ym2203TimerIrq(s.opnTimer)) request(4);
       updateMap();
       break;
     }
     case 0x34: s.p34 = v; break;
     case 0x35: s.p35 = v; if (v & 0x80) s.vramSel = 3; updateMap(); break;
-    // 40h〜43h は同じ(アドレスのデコードが A2 から上だけ。未確認の情報)。ミルキーウェイは
-    // 「PC-8801mkII」を選ぶと 41h の bit7(SING)で曲を鳴らす
     case 0x40: case 0x41: case 0x42: case 0x43: {
       uint8_t old = s.p40;
       s.p40 = v;
       if ((v & 0x02) && !(old & 0x02)) calStrobe();
       if ((v & 0x04) && !(old & 0x04)) calClock();
-      if ((old ^ v) & 0xA0) pc88Speaker(v);                         // bit5 = BEEP、bit7 = SING
+      if ((old ^ v) & 0xA0) pc88Speaker(v);
       break;
     }
     case 0x44: s.opnAddr = v; break;
     case 0x45:
       if (s.opnAddr < 0x10) s.ssgShadow[s.opnAddr] = v;
       ym2203TimerWrite(s.opnTimer, s.opnAddr, v);
-      if (s.opnAddr == 0x27 && !ym2203TimerIrq(s.opnTimer)) s.irqReq &= (uint8_t)~0x10;   // IRQ が消えた: 未応答の要求も消す
+      if (s.opnAddr == 0x27 && !ym2203TimerIrq(s.opnTimer)) s.irqReq &= (uint8_t)~0x10;
       pc88OpnWrite(s.opnAddr, v);
       break;
     case 0x50: case 0x51: pc88CrtcWrite(p, v); break;
@@ -272,11 +248,11 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
     case 0x53: s.p53 = v; break;
     case 0x54: case 0x55: case 0x56: case 0x57: case 0x58: case 0x59: case 0x5A: case 0x5B: {
       int n = p - 0x54;
-      if (!(s.p32 & 0x20)) {                                  // デジタル
+      if (!(s.p32 & 0x20)) {
         s.pal[n][0] = (v & 1) ? 7 : 0; s.pal[n][1] = (v & 2) ? 7 : 0; s.pal[n][2] = (v & 4) ? 7 : 0;
-      } else if (n == 0 && (v & 0x80)) {                      // アナログの背景色
+      } else if (n == 0 && (v & 0x80)) {
         if (v & 0x40) s.bg[2] = v & 7; else { s.bg[0] = v & 7; s.bg[1] = (v >> 3) & 7; }
-      } else {                                                // アナログ
+      } else {
         if (v & 0x40) s.pal[n][2] = v & 7; else { s.pal[n][0] = v & 7; s.pal[n][1] = (v >> 3) & 7; }
       }
       s.palDirty = true;
@@ -301,10 +277,6 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  ライン処理
-// ---------------------------------------------------------------------------
-// 処理時間の内訳(ESP32 の CPU クロック数。PC88.ino が読んで 0 に戻す)
 uint32_t pc88ProfRender, pc88ProfDisk;
 #ifdef ARDUINO
 static inline uint32_t profClock() { uint32_t c; asm volatile("rsr %0, ccount" : "=a"(c)); return c; }
@@ -319,15 +291,9 @@ void PC88_FAST pc88Line(int line) {
   if (line < PC88_DISPLAY_LINES) pc88RenderLine(line);
   uint32_t t1 = profClock();
   pc88ProfRender += t1 - t0;
-  // VRTC は CRTC の表示期間(L×R ラスタ)の終わりから(サークII は 24 行 × 16 ラスタ = 384 ラスタで 192 行目)
   if (line == s.dispLines) { s.vrtc = true; request(1); s.frame++; calTick(); }
-  // 1/600 秒(6656 クロック)
   s.rtcAcc += PC88_CYCLES_PER_LINE;
   while (s.rtcAcc >= 6656) { s.rtcAcc -= 6656; request(2); }
-  // OPN のタイマー(1 行 = 322 クロック = 1290/16 us)。割込みはレベル: IRQ が出ている間は要求し続ける
-  // (MAME と同じ。YM2203 の IRQ は i8214 にそのまま入る)。立ち上がりだけで要求していたときは、
-  // タイマー B の割込みの処理中に A があふれ、ハンドラが B のフラグだけ消して戻ると、IRQ が出たまま
-  // 二度と要求されず OPN の割込みが止まっていた(夢幻戦士ヴァリス2 デモ)。フラグを消したら要求も消す(0x45)
   ym2203TimerAdvance(s.opnTimer, 1290);
   if (ym2203TimerIrq(s.opnTimer)) request(4);
   uint32_t t2 = profClock();
@@ -335,14 +301,10 @@ void PC88_FAST pc88Line(int line) {
   pc88ProfDisk += profClock() - t2;
 }
 
-// ---------------------------------------------------------------------------
-//  初期化
-// ---------------------------------------------------------------------------
 void pc88Init(const Pc88Memory &mem, const Pc88Config &cfg) {
   pc88.mem = mem;
   pc88.cfg = cfg;
   memset(romFF, 0xFF, sizeof(romFF));
-  // 電源投入時の RAM の中身(64 バイトごとに 00h / FFh。FFFFh と FF33h は 00h)§2.6
   for (uint32_t a = 0; a < 0x10000; a++) *ramPtr(a) = (a & 0x40) ? 0xFF : 0x00;
   *ramPtr(0xFFFF) = 0x00;
   *ramPtr(0xFF33) = 0x00;
@@ -355,7 +317,6 @@ void pc88Init(const Pc88Memory &mem, const Pc88Config &cfg) {
 void pc88Reset() {
   Pc88State &s = pc88;
   const Pc88Config &c = s.cfg;
-  // ディップスイッチ(§3.2)。V2 / 80 桁 / 25 行: 30h = D3h、31h = 79h
   s.dip30 = (uint8_t)(0xD2 | (c.mode == PC88_N ? 0 : 1) | (c.cols40 ? 0x04 : 0) | (c.rows20 ? 0x08 : 0));
   s.dip31 = (uint8_t)(0x39 | (c.mode == PC88_V2 || c.mode == PC88_V1H ? 0x40 : 0) | (c.mode == PC88_V2 ? 0 : 0x80));
   s.highSpeed = (s.dip31 & 0x40) != 0;

@@ -19,9 +19,8 @@
 #define YM_FAST
 #endif
 
-// ---- 表(初回に作る) ----
-static uint16_t logSin[256];             // 1/4 波の -log2(sin) × 256
-static uint16_t expTab[256];             // 2^(-k/256) × 8192
+static uint16_t logSin[256];
+static uint16_t expTab[256];
 static bool     tablesReady;
 
 static void buildTables() {
@@ -34,22 +33,20 @@ static void buildTables() {
   tablesReady = true;
 }
 
-// エンベロープ: レート(0〜63)ごとの増分の並び(8段)とシフト
 static const uint8_t egInc[19 * 8] = {
   0,1,0,1,0,1,0,1,  0,1,0,1,1,1,0,1,  0,1,1,1,0,1,1,1,  0,1,1,1,1,1,1,1,
   1,1,1,1,1,1,1,1,  1,1,1,2,1,1,1,2,  1,2,1,2,1,2,1,2,  1,2,2,2,1,2,2,2,
   2,2,2,2,2,2,2,2,  2,2,2,4,2,2,2,4,  2,4,2,4,2,4,2,4,  2,4,4,4,2,4,4,4,
   4,4,4,4,4,4,4,4,  4,4,4,8,4,4,4,8,  4,8,4,8,4,8,4,8,  4,8,8,8,4,8,8,8,
   8,8,8,8,8,8,8,8,  16,16,16,16,16,16,16,16,  0,0,0,0,0,0,0,0 };
-static inline int egSel(int r) {         // egInc の行
-  if (r < 4) return 18 * 0 + (r == 0 ? 18 : r & 3);   // レート 0 は止まる
+static inline int egSel(int r) {
+  if (r < 4) return 18 * 0 + (r == 0 ? 18 : r & 3);
   if (r < 48) return r & 3;
   if (r < 60) return 4 + (r - 48);
   return 16;
 }
 static inline int egShift(int r) { return r < 48 ? 11 - (r >> 2) : 0; }
 
-// デチューン(キーコード 0〜31、DT 1〜3。4〜7 は符号を反転)。単位は 20bit 位相の増分
 static const uint8_t dtTab[4][32] = {
   { 0 },
   { 0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,3,3,3,4,4,4,5,5,6,6,7,8,8,8,8 },
@@ -61,31 +58,31 @@ enum { EG_ATT, EG_DEC, EG_SUS, EG_REL, EG_OFF };
 struct FmOp {
   uint8_t  dt, mul, tl, ks, ar, dr, sr, sl, rr;
   uint32_t phase, inc;
-  int16_t  env;                          // 0(最大)〜1023(無音)
-  uint16_t att;                          // env + TL(0〜1023)。オペレータの計算で使う
+  int16_t  env;
+  uint16_t att;
   uint8_t  state, ksr;
-  uint8_t  ssg;                          // SSG-EG(90h〜 の下位4ビット。bit3 = 有効)
-  uint8_t  ssgn;                         // SSG-EG の反転(bit1 = 出力を反転、bit0 = 一度反転した)
-  bool     regKey;                       // 28h でキーオンしている(CSM のキーオフで消さない)
+  uint8_t  ssg;
+  uint8_t  ssgn;
+  bool     regKey;
 };
 struct FmCh {
-  FmOp     op[4];                        // オペレータ番号 1〜4 の順
+  FmOp     op[4];
   uint16_t fnum; uint8_t block, kc;
   uint8_t  fb, alg;
-  int32_t  fb0, fb1;                     // オペレータ1の直前2回の出力(フィードバック用)
+  int32_t  fb0, fb1;
 };
 struct Ym2203Fm {
   uint32_t clock, rate;
-  uint64_t scaleQ16;                     // (チップの FM の周波数 / 出力周波数) × 65536
+  uint64_t scaleQ16;
   uint32_t egAcc, egCnt;
   FmCh     ch[3];
-  uint8_t  mode27;                       // 27h の上位2ビット(チャンネル3 の効果音モード)
-  uint16_t fnum3[3]; uint8_t block3[3], kc3[3];   // チャンネル3 のオペレータ別(OP1, OP2, OP3)
-  uint8_t  latchA4, latchAC;             // F ナンバー上位の書き込み待ち
-  uint16_t na;                           // タイマー A の値(24h/25h。CSM 用)
-  bool     timerA;                       // タイマー A が動いている(27h bit0)
-  uint64_t csmAcc;                       // CSM: タイマー A の進み(FM のサンプル数 × 65536)
-  uint32_t fbIncLo, fbIncHi;             // FB の制限: オペレータ1 の位相の増分 300Hz / 1800Hz 相当(0 = 制限なし)
+  uint8_t  mode27;
+  uint16_t fnum3[3]; uint8_t block3[3], kc3[3];
+  uint8_t  latchA4, latchAC;
+  uint16_t na;
+  bool     timerA;
+  uint64_t csmAcc;
+  uint32_t fbIncLo, fbIncHi;
 };
 
 static inline int keycode(uint16_t fnum, uint8_t block) {
@@ -94,14 +91,13 @@ static inline int keycode(uint16_t fnum, uint8_t block) {
   return (block << 2) | (f11 << 1) | n3;
 }
 
-// オペレータの位相の増分(出力1サンプルあたり、32bit 位相の上位10bit がサイン表の位置)
 static void updateInc(Ym2203Fm *fm, FmOp &o, uint16_t fnum, uint8_t block, uint8_t kc) {
   int32_t fc = (int32_t)(((uint32_t)fnum << block) >> 1);
   int d = dtTab[o.dt & 3][kc];
   fc += (o.dt & 4) ? -d : d;
   fc &= 0x1FFFF;
   uint32_t inc20 = o.mul ? (uint32_t)fc * o.mul : (uint32_t)fc >> 1;
-  o.inc = (uint32_t)(((uint64_t)inc20 * fm->scaleQ16) >> 4);   // 20bit → 32bit(<<12)、Q16 → >>16
+  o.inc = (uint32_t)(((uint64_t)inc20 * fm->scaleQ16) >> 4);
   o.ksr = (uint8_t)(kc >> (3 - o.ks));
 }
 
@@ -116,7 +112,7 @@ static void updateCh(Ym2203Fm *fm, int c) {
   }
 }
 
-static inline int rateFor(const FmOp &o, int base) {   // base = 2×設定値(RR は 4×+2)
+static inline int rateFor(const FmOp &o, int base) {
   if (!base) return 0;
   int r = base + o.ksr;
   return r > 63 ? 63 : r;
@@ -124,7 +120,7 @@ static inline int rateFor(const FmOp &o, int base) {   // base = 2×設定値(RR
 
 static inline void updateAtt(FmOp &o) {
   int e = o.env;
-  if ((o.ssg & 0x08) && (o.ssgn & 2) && o.state < EG_REL) e = (0x200 - e) & 1023;   // SSG-EG の反転
+  if ((o.ssg & 0x08) && (o.ssgn & 2) && o.state < EG_REL) e = (0x200 - e) & 1023;
   int a = e + (o.tl << 3);
   o.att = (uint16_t)(a > 1023 ? 1023 : a);
 }
@@ -133,7 +129,7 @@ static void keyOn(FmOp &o) {
   if (o.state != EG_OFF && o.state != EG_REL) return;
   o.phase = 0;
   o.state = EG_ATT;
-  o.ssgn = (o.ssg & 0x04) >> 1;          // SSG-EG: ATTACK のビットなら反転から始める
+  o.ssgn = (o.ssg & 0x04) >> 1;
   if (rateFor(o, o.ar * 2) >= 62) { o.env = 0; o.state = EG_DEC; }
   updateAtt(o);
 }
@@ -159,7 +155,7 @@ static void YM_FAST egStep(Ym2203Fm *fm, FmOp &o) {
       if (o.env <= 0) { o.env = 0; o.state = EG_DEC; }
       break;
     case EG_DEC: {
-      o.env += ssgEg ? inc * 4 : inc;    // SSG-EG のときは減衰が4倍速い
+      o.env += ssgEg ? inc * 4 : inc;
       int sl = o.sl == 15 ? 31 * 32 : o.sl * 32;
       if (o.env >= sl) { o.env = (int16_t)sl; o.state = EG_SUS; }
       break;
@@ -167,12 +163,12 @@ static void YM_FAST egStep(Ym2203Fm *fm, FmOp &o) {
     case EG_SUS:
       if (ssgEg) {
         o.env += inc * 4;
-        if (o.env >= 0x200) {            // SSG-EG: -48dB まで下がったら形に合わせて止める / やり直す
+        if (o.env >= 0x200) {
           uint8_t swap = 0;
           o.env = 1023;
-          if (o.ssg & 0x01) {            // HOLD
+          if (o.ssg & 0x01) {
             if (!(o.ssgn & 1)) swap = (o.ssg & 0x02) | 1;
-          } else {                       // くり返し(キーオンと同じに最初から)
+          } else {
             o.phase = 0;
             o.env = 511;
             o.state = EG_ATT;
@@ -216,9 +212,9 @@ void ym2203Reset(Ym2203Fm *fm) {
   uint32_t clock = fm->clock, rate = fm->rate;
   memset(fm, 0, sizeof(*fm));
   fm->clock = clock; fm->rate = rate;
-  fm->scaleQ16 = (uint64_t)((double)clock / 72.0 / rate * 65536.0 + 0.5);   // FM の分周はリセット時 1/6(×12)
-  if (YM_FB_CLIP_ENABLE && rate < YM_FB_CLIP_RATE) {   // 出力がチップの FM の周波数(約 55kHz)より大幅に低いときだけ FB を制限
-    double lo = (double)YM_FB_CLIP_LO_HZ / rate, hi = (double)YM_FB_CLIP_HI_HZ / rate;   // 1 = 出力の周波数
+  fm->scaleQ16 = (uint64_t)((double)clock / 72.0 / rate * 65536.0 + 0.5);
+  if (YM_FB_CLIP_ENABLE && rate < YM_FB_CLIP_RATE) {
+    double lo = (double)YM_FB_CLIP_LO_HZ / rate, hi = (double)YM_FB_CLIP_HI_HZ / rate;
     fm->fbIncLo = lo >= 1.0 ? 0xFFFFFFFFu : (uint32_t)(lo * 4294967296.0);
     fm->fbIncHi = hi >= 1.0 ? 0xFFFFFFFFu : (uint32_t)(hi * 4294967296.0);
   }
@@ -232,18 +228,18 @@ void ym2203Reset(Ym2203Fm *fm) {
 }
 
 void ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t v) {
-  if (reg == 0x24) { fm->na = (uint16_t)((fm->na & 3) | (v << 2)); return; }      // タイマー A(CSM 用)
+  if (reg == 0x24) { fm->na = (uint16_t)((fm->na & 3) | (v << 2)); return; }
   if (reg == 0x25) { fm->na = (uint16_t)((fm->na & 0x3FC) | (v & 3)); return; }
   if (reg == 0x27) {
     uint8_t old = fm->mode27;
     fm->mode27 = v & 0xC0;
     if ((old ^ fm->mode27) & 0xC0) updateCh(fm, 2);
     bool run = (v & 1) != 0;
-    if (run && !fm->timerA) fm->csmAcc = 0;             // 動かし始めは最初から数える
+    if (run && !fm->timerA) fm->csmAcc = 0;
     fm->timerA = run;
     return;
   }
-  if (reg == 0x28) {                     // キーオン/オフ
+  if (reg == 0x28) {
     int c = v & 3;
     if (c == 3) return;
     FmCh &ch = fm->ch[c];
@@ -254,10 +250,10 @@ void ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t v) {
     }
     return;
   }
-  if (reg >= 0x30 && reg < 0xA0) {       // オペレータのパラメータ
+  if (reg >= 0x30 && reg < 0xA0) {
     int c = reg & 3;
     if (c == 3) return;
-    static const uint8_t slotOfReg[4] = { 0, 2, 1, 3 };   // 並びは OP1, OP3, OP2, OP4
+    static const uint8_t slotOfReg[4] = { 0, 2, 1, 3 };
     FmOp &o = fm->ch[c].op[slotOfReg[(reg >> 2) & 3]];
     switch (reg & 0xF0) {
       case 0x30: o.dt = (v >> 4) & 7; o.mul = v & 15; updateCh(fm, c); break;
@@ -266,7 +262,7 @@ void ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t v) {
       case 0x60: o.dr = v & 0x1F; break;
       case 0x70: o.sr = v & 0x1F; break;
       case 0x80: o.sl = v >> 4; o.rr = v & 15; break;
-      case 0x90: o.ssg = v & 0x0F; updateAtt(o); break;   // SSG-EG
+      case 0x90: o.ssg = v & 0x0F; updateAtt(o); break;
     }
     return;
   }
@@ -278,7 +274,7 @@ void ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t v) {
     return;
   }
   if (reg >= 0xA4 && reg <= 0xA6) { fm->latchA4 = v; return; }
-  if (reg >= 0xA8 && reg <= 0xAA) {      // チャンネル3 のオペレータ別: A9 = OP1、AA = OP2、A8 = OP3
+  if (reg >= 0xA8 && reg <= 0xAA) {
     static const int opOfReg[3] = { 2, 0, 1 };
     int k = opOfReg[reg - 0xA8];
     fm->fnum3[k] = (uint16_t)(((fm->latchAC & 7) << 8) | v);
@@ -297,11 +293,8 @@ void ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t v) {
 }
 
 void YM_FAST ym2203Generate(Ym2203Fm *fm, int32_t *out, int n) {
-  // エンベロープはチップの FM の3サンプルに1回進む
   const uint32_t egStepQ16 = (uint32_t)fm->scaleQ16, egPeriod = 3u << 16;
   for (int s = 0; s < n; s++) {
-    // CSM: タイマー A があふれるたびにチャンネル3 の全オペレータをキーオンし、次のサンプルでキーオフ
-    // (28h でキーオンしているオペレータはそのまま)。タイマー A の周期 = (1024 - NA) × FM の1サンプル
     bool csmOn = false;
     if ((fm->mode27 & 0xC0) == 0x80 && fm->timerA) {
       fm->csmAcc += fm->scaleQ16;
@@ -329,16 +322,12 @@ void YM_FAST ym2203Generate(Ym2203Fm *fm, int32_t *out, int n) {
       int fbm = 0;
       if (ch.fb) {
         fbm = (int)((ch.fb0 + ch.fb1) >> (10 - ch.fb));
-        // FB の効きを 16384Hz で成り立つところまでに制限する(値と考え方は ym2203.h の YM_FB_CLIP_*)。
-        // FB はオペレータ1 の直前2回の出力を位相に足すので、1 サンプルの間隔がチップ(約 55kHz)の 3.4 倍あると、
-        // 効きが FB5 前後のところで実機にない 5〜6kHz の音が出る
-        // (既定値でチップの周波数で計算した音との誤差 7〜11dB → 2〜5dB、計算の増加はほぼなし)
         uint32_t inc0 = op[0].inc;
         if (inc0 < fm->fbIncHi) {
-          int e = ch.fb * 64 - op[0].att;          // 実効の効き(1/64 段)
+          int e = ch.fb * 64 - op[0].att;
           int emax = inc0 < fm->fbIncLo ? YM_FB_CLIP_MAX_LO : YM_FB_CLIP_MAX;
           if (e > emax && e < YM_FB_CLIP_NOISE) {
-            int d = (e - emax) * 4;                // 2^(-(e - emax)/64) を掛ける
+            int d = (e - emax) * 4;
             fbm = (d >> 8) >= 14 ? 0 : (fbm * (int)(expTab[d & 255] >> (d >> 8))) >> 13;
           }
         }
@@ -365,9 +354,6 @@ void YM_FAST ym2203Generate(Ym2203Fm *fm, int32_t *out, int n) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  タイマー
-// ---------------------------------------------------------------------------
 static inline int64_t periodA(const Ym2203Timer &t) { return (int64_t)(1024 - t.na) * 12 * t.prescale; }
 static inline int64_t periodB(const Ym2203Timer &t) { return (int64_t)(256 - t.nb) * 16 * 12 * t.prescale; }
 
@@ -384,7 +370,7 @@ void ym2203TimerWrite(Ym2203Timer &t, uint8_t reg, uint8_t v) {
     case 0x26: t.nb = v; break;
     case 0x27: {
       uint8_t old = t.ctrl;
-      if ((v & 1) && !(old & 1)) t.cntA = periodA(t);     // 動かし始め
+      if ((v & 1) && !(old & 1)) t.cntA = periodA(t);
       if ((v & 2) && !(old & 2)) t.cntB = periodB(t);
       if (v & 0x10) t.status &= ~1;
       if (v & 0x20) t.status &= ~2;

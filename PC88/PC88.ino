@@ -20,7 +20,6 @@
  *   Joy B1〜B3 で決めたキー(Enter で反転 → 次に押したキーを割り当て。/PC88/JOYKEY.CFG に保存)。
  *   SR のジョイスティック端子(SSG のポート)は再現しない(キーの割り当てだけで使う)
  *
- *  【仕様】PC88_REQUIREMENTS.md
  * ============================================================================
  */
 #pragma GCC optimize("O3")
@@ -40,7 +39,6 @@
 
 #define USE_SERIAL_DEBUG
 
-// TTGO VGA32
 #define SD_SCLK 14
 #define SD_MISO 2
 #define SD_MOSI 12
@@ -48,18 +46,29 @@
 
 #define CPU_CYCLES_PER_LINE PC88_CYCLES_PER_LINE
 
-// D88 ファイルの中のイメージ(何枚も続けて入っていることがある。ヘッダ 1Ch がそのイメージの大きさ)。
-// Arduino が関数の宣言を先頭に足すので、型はここで定義しておく
+#define PC88_VGA_HZ 55
+#if PC88_VGA_HZ == 55
+#define PC88_VGA_VTOTAL 284
+#elif PC88_VGA_HZ == 56
+#define PC88_VGA_VTOTAL 281
+#elif PC88_VGA_HZ == 60
+#define PC88_VGA_VTOTAL 262
+#else
+#error "PC88_VGA_HZ は 55 / 56 / 60 のどれか"
+#endif
+#if PC88_VGA_HZ == 60
+#define PC88_VGA_SYNC 0
+#define PC88_FRAME_REAL_US PC88_FRAME_US
+#else
+#define PC88_VGA_SYNC 1
+#define PC88_FRAME_REAL_US (800 * 2 * PC88_VGA_VTOTAL * 1000 / 25175)
+#endif
 struct D88Image { uint32_t ofs, size; char name[18]; };
 static const int D88_MAX_IMAGES = 16;
 
-// PS/2 → PC-8801 のキーマトリクスの表(キーボードと、ジョイスティックのボタンの割り当てで使う)
 struct Pc88KeyMap { uint8_t ps2; bool ext; uint8_t row, bit; };
 #include "pc88_keymap.h"
 
-// ---------------------------------------------------------------------------
-//  Z80 グルー(メモリは Z80.c が pc88_rd_map / pc88_wr_map を直接引く)
-// ---------------------------------------------------------------------------
 extern "C" {
   extern Z80 cpu;
   byte InZ80(zword Port);
@@ -76,9 +85,6 @@ int pc88LineCycle() {
   return c < 0 ? 0 : c >= CPU_CYCLES_PER_LINE ? CPU_CYCLES_PER_LINE - 1 : c;
 }
 
-// ---------------------------------------------------------------------------
-//  FabGL
-// ---------------------------------------------------------------------------
 fabgl::VGAController DisplayController;
 fabgl::Canvas *canvas;
 fabgl::SoundGenerator soundGenerator;
@@ -88,30 +94,20 @@ volatile bool frameReady = false;
 uint8_t **pc88_rows = nullptr;
 
 uint8_t pc88NativeColor(int r, int g, int b) {
-  // FabGL の RGB222 は各 2bit。アナログパレットの 3bit(0〜7)を 2bit に落とす
   return DisplayController.createRawPixel(fabgl::RGB222(r >> 1, g >> 1, b >> 1));
 }
 
-// ---------------------------------------------------------------------------
-//  ジョイスティック(MSX / X1 と同じつなぎ方)
-//   別マイコンから Serial1 (RX=GPIO39, 115200bps) で1バイトずつ届く。bit7=0 なら1P、1 なら2P。
-//   下位6bit は MSX の並び(bit0 上 / 1 下 / 2 左 / 3 右 / 4 トリガA / 5 トリガB、0=押下)。
-//   PC-8801 は SSG の I/O ポート A(R14)= 方向、B(R15)= トリガ(PC88_REQUIREMENTS.md)。
-// ---------------------------------------------------------------------------
 static volatile uint8_t joyMsx[2] = { 0x7F, 0x7F };
 static void updateJoystick() {
   uint8_t j[2] = { 0x7F, 0x7F };
   while (Serial1.available() > 0) {
     uint8_t b = Serial1.read();
-    j[(b & 0x80) ? 1 : 0] = b & 0x7F;              // bit6 = ボタン3
+    j[(b & 0x80) ? 1 : 0] = b & 0x7F;
   }
   joyMsx[0] = j[0];
   joyMsx[1] = j[1];
 }
 
-// 起動メニュー・ファイル選択を1P のコントローラで操作する(MSX 版の JoyKeys.hpp と同じ)
-//   'U' 'D' 'L' 'R' = 方向(押した瞬間と、0.4 秒押し続けたあと 0.12 秒ごと)、'A' = ボタン1、'B' = ボタン2、0 = なし
-//   変換器は約 60Hz で送ってくる。0.1 秒届かなければ離したことにする
 static int joyMenuPoll() {
   static uint8_t state = 0x7F, last = 0x7F;
   static uint32_t lastRx = 0, repeatAt = 0;
@@ -134,7 +130,6 @@ static int joyMenuPoll() {
   }
   return 0;
 }
-// 操作を PS/2 のスキャンコードに直す: ↑↓ = カーソル、←→ = PageUp/PageDown、ボタン1 = Enter、ボタン2 = ESC
 static int joyMenuScancode(bool *e0) {
   *e0 = true;
   switch (joyMenuPoll()) {
@@ -148,32 +143,23 @@ static int joyMenuScancode(bool *e0) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  ジョイスティック → キーボード(JoyToKey と同じ考え方。いつも有効)
-//   1P の方向 = テンキーの 8 / 2 / 4 / 6、ボタン1〜3 = 起動メニューで決めたキー
-//   (/PC88/JOYKEY.CFG に保存)。キーボードの押下とは別に持ち、毎フレーム AND して pc88_key にする。
-// ---------------------------------------------------------------------------
 static volatile uint8_t kbdKeys[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-static uint8_t joyButtonKey[3] = { 0x96, 0x17, 0x97 };   // 0xRB(R = ポート、B = ビット): SPACE / RETURN / ESC
+static uint8_t joyButtonKey[3] = { 0x96, 0x17, 0x97 };
 static const char *JOYKEY_FILE = "/PC88/JOYKEY.CFG";
 
-// SR のジョイスティック端子(SSG の I/O ポート)は再現しない(ユーザー指定。何もつないでいない = FFh)。
-// 端子とテンキーを両方読むゲームでは上下の意味が逆のことがあり(スペースハリアー: テンキー 8 = 上、
-// レバー上 = 下)、両方に出すと打ち消し合っていた。ジョイスティックはキーの割り当てだけで使う
 static void joyToKeys() {
   uint8_t joy[16];
   memset(joy, 0xFF, sizeof(joy));
-  uint8_t m = joyMsx[0];                           // 0 = 押下
-  if (!(m & 0x01)) joy[0x1] &= (uint8_t)~0x01;     // ↑ → テンキー 8
-  if (!(m & 0x02)) joy[0x0] &= (uint8_t)~0x04;     // ↓ → テンキー 2
-  if (!(m & 0x04)) joy[0x0] &= (uint8_t)~0x10;     // ← → テンキー 4
-  if (!(m & 0x08)) joy[0x0] &= (uint8_t)~0x40;     // → → テンキー 6
+  uint8_t m = joyMsx[0];
+  if (!(m & 0x01)) joy[0x1] &= (uint8_t)~0x01;
+  if (!(m & 0x02)) joy[0x0] &= (uint8_t)~0x04;
+  if (!(m & 0x04)) joy[0x0] &= (uint8_t)~0x10;
+  if (!(m & 0x08)) joy[0x0] &= (uint8_t)~0x40;
   for (int b = 0; b < 3; b++)
     if (!(m & (0x10 << b))) joy[joyButtonKey[b] >> 4] &= (uint8_t)~(1 << (joyButtonKey[b] & 7));
   for (int r = 0; r < 16; r++) pc88_key[r] = kbdKeys[r] & joy[r];
 }
 
-// PC-8801 のキーの名前(ポート 0〜11、ビット 0〜7)。起動メニューの表示用
 static const char *const PC88_KEY_NAMES[12][8] = {
   { "NUM0", "NUM1", "NUM2", "NUM3", "NUM4", "NUM5", "NUM6", "NUM7" },
   { "NUM8", "NUM9", "NUM*", "NUM+", "NUM=", "NUM,", "NUM.", "RETURN" },
@@ -205,47 +191,26 @@ static void saveJoyKeys() {
   f.close();
 }
 
-// ---------------------------------------------------------------------------
-//  音: YM2203(FM 3ch + SSG 3ch)+ ビープ・SING(ポート 40h の bit5 / bit7。スピーカーは 1 本で、
-//   BEEP = 2.4kHz の発振を出す / 止める、SING = CPU がスピーカーを直接オン/オフ。SR より前のソフトの
-//   音楽・効果音(ハイドライドなど)は SING と BEEP を CPU で切り替えて鳴らす)
-//   FM は ym2203.cpp、SSG は MSX2 版と同じ AY-3-8910 の作り(クロック 3.9936MHz/2)。
-//   エミュレーション側(コア0)はレジスタの書き込みを「エミュレーションの時刻」付きでキューに積むだけで、
-//   サウンド側(コア1 の loop)がキューを読んで、その時刻のサンプルで反映しながら音を作る。
-//   (以前は時刻なしで、1ms ごとにまとめて反映していた。CPU は 1 フレームを 5〜15ms で走って残りは
-//    待つので、フレームの中の書き込みの間隔が実際の 1/3〜4/5 に縮み、タイマー割込みで鳴らす曲の
-//    音の並びが最大 ±6ms ほどがたついていた)
-// ---------------------------------------------------------------------------
 static const int SND_BUFFER_SIZE = 512;
 static const int OPN_QUEUE = 1024;
-// bit31-16 = 時刻(CPU 32 クロック単位の下位 16bit)、bit15-8 = レジスタ、bit7-0 = 値。
-// 4KB なので setup でメイン RAM のページを内部 RAM に置いたあと(opnGen.begin)に確保する
 static volatile uint32_t *opnQueue = nullptr;
 static volatile int opnQHead = 0, opnQTail = 0;
 
-// エミュレーションの時刻(CPU クロック)。cpuTask が 1 ラインごとに進める = 終わったラインの終わり。
-// これより前の時刻の書き込みは全部キューに入っている
 static volatile uint32_t opnEmuClock = 0;
 
-static const uint8_t SPK_REG = 0xFF;             // キューの中でポート 40h(BEEP・SING)を表すレジスタ番号
+static const uint8_t SPK_REG = 0xFF;
 static void soundQueuePush(uint8_t reg, uint8_t val) {
   int next = (opnQHead + 1) % OPN_QUEUE;
-  if (next == opnQTail || !opnQueue) return;       // あふれたら捨てる(ふつうは起きない)
+  if (next == opnQTail || !opnQueue) return;
   uint32_t t = opnEmuClock + (uint32_t)pc88LineCycle();
   opnQueue[opnQHead] = ((t >> 5) << 16) | ((uint32_t)reg << 8) | val;
   opnQHead = next;
 }
 void pc88OpnWrite(uint8_t reg, uint8_t val) { soundQueuePush(reg, val); }
-// ポート 40h の bit7(SING)・bit5(BEEP)。SING は数百 Hz〜数 kHz で切り替えられるので、OPN と同じく時刻付きで送る
 void pc88Speaker(uint8_t bits) { soundQueuePush(SPK_REG, bits & 0xA0); }
 
 class OpnGenerator : public fabgl::WaveformGenerator {
   Ym2203Fm *fm = nullptr;
-  // ---- SSG: MSX2 版の AY38910Generator と同じ作り(ユーザー要望で移植) ----
-  //   以前の作りは (1) トーンとノイズを OR で混ぜていた(AY は AND)、(2) 3ch の和が FM と足して
-  //   ±127 を大きく超えて割れていた、ので音がおかしかった。
-  //   1 刻み = AY の 16 クロック(AY のクロック = 3.9936MHz/2)。トーンは 1 刻みに 2 進めて TP で反転
-  //   (周期 16×TP クロック)、ノイズは NP 刻みに 1 回、エンベロープは EP 刻みに 1 段(16 段で 256×EP)。
   const uint32_t psgClock = PC88_CPU_CLOCK / 2 / 16;
   uint32_t tickAccum = 0, tickStep = 0;
   uint8_t  regs[16] = { 0 };
@@ -254,26 +219,16 @@ class OpnGenerator : public fabgl::WaveformGenerator {
   uint32_t envCounter = 0, envStep = 0, envVol = 0;
   uint32_t toneCounter[3] = { 0, 0, 0 };
   uint32_t toneOut = 0, noiseCounter = 0, lfsr = 1, noiseOut = 0;
-  // 音量は実機(YM2203 / YM2149)と同じく 1 段 3dB の対数(15 = 127、11 = -12dB、8 = -21dB)。
-  // MSX2 版の表は直線に近く、Ys2 の伴奏(音量 8〜11)が実機より 2.5〜4 倍大きく出ていた
   const int16_t volTable[16] = { 0, 1, 1, 2, 3, 4, 6, 8, 11, 16, 22, 32, 45, 64, 90, 127 };
-  int32_t  dcPrev = 0, dcOut = 0;                  // 直流を取る1次ハイパス(約10Hz)
-  // FM の高音の補正(1次ローパス、y += 0.78 × (x − y)。4kHz −2.3dB、8kHz −3.9dB)。
-  // 16384Hz で計算した FM は 8kHz を超える倍音・FB のノイズが折り返して、2kHz より上がチップ
-  // (約 55kHz で計算して 7.5kHz で帯域制限した音)より 2〜5dB 強い。Ys2・アルファ・Daiva・LastArmageddon の
-  // 比較で、帯域ごとの差が 1/2〜1/3 になる強さ。0 にすると補正なし
+  int32_t  dcPrev = 0, dcOut = 0;
   #define FM_TREBLE_FIX 320
   int32_t  fmLp = 0;
-  // ---- ビープ(2.4kHz の矩形波)と SING ----
   uint32_t beepPhase = 0, beepStep = 0;
-  uint8_t  spk = 0;                                // ポート 40h の bit7(SING)・bit5(BEEP)
-  // SING の切り替えがサンプルの途中だったときは、そのサンプルを切り替えの前後の長さで混ぜる
-  // (16384Hz に丸めると 1kHz の音でも周期が 1 サンプルずつ揺れてざらつくため)。値は 1/256 単位
+  uint8_t  spk = 0;
   bool     singPend = false;
   int32_t  singArea = 0, singRem = 0;
-  static const int SPK_AMP = 60;                   // スピーカーの振れ幅(FM 1ch の 1/2 弱。以前のビープと同じ)
+  static const int SPK_AMP = 60;
 
-  // w = 次に作るサンプルの中で、切り替えのあとの長さ(0〜256)
   void spkWrite(uint8_t v, int32_t w) {
     bool oldSing = spk & 0x80, newSing = v & 0x80;
     spk = v;
@@ -325,7 +280,6 @@ class OpnGenerator : public fabgl::WaveformGenerator {
     }
   }
 
-  // 3ch の和(0〜381。直流分は fillBuffer のハイパスで取る)
   int ssgSample() {
     uint32_t r7 = regs[7], r8 = regs[8], r9 = regs[9], r10 = regs[10];
     uint32_t tp0 = tonePeriod[0], tp1 = tonePeriod[1], tp2 = tonePeriod[2], np = noisePeriod;
@@ -343,7 +297,7 @@ class OpnGenerator : public fabgl::WaveformGenerator {
       }
       if (!holding && ++envCounter >= envPeriod) { envCounter = 0; stepEnvelope(); }
     }
-    uint32_t mix = (toneOut | r7) & ((noiseOut ? 0x07 : 0) | (r7 >> 3));   // トーンとノイズは AND(AY と同じ)
+    uint32_t mix = (toneOut | r7) & ((noiseOut ? 0x07 : 0) | (r7 >> 3));
     int volA = volTable[(r8 & 0x10) ? envVol : (r8 & 0x0F)];
     int volB = volTable[(r9 & 0x10) ? envVol : (r9 & 0x0F)];
     int volC = volTable[(r10 & 0x10) ? envVol : (r10 & 0x0F)];
@@ -364,11 +318,12 @@ public:
   void setSampleRate(int rate) {
     this->fabgl::WaveformGenerator::setSampleRate(rate);
     tickStep = (uint32_t)(((uint64_t)psgClock << 16) / (rate > 0 ? rate : 16384));
+    clkPerSampleQ16 = (uint32_t)((((uint64_t)PC88_CYCLES_PER_LINE * PC88_LINES_PER_FRAME * 1000000u) << 16) /
+                                 ((uint64_t)PC88_FRAME_REAL_US * (rate > 0 ? rate : 16384)));
     beepStep = (uint32_t)(((uint64_t)2400 << 32) / (rate > 0 ? rate : 16384));
   }
   uint8_t ssgRead(uint8_t reg) { return regs[reg & 15]; }
 
-  // キューの先頭の書き込みを反映(w = SING の切り替えの位置。applyQueued の説明は spkWrite)
   void applyQueued(int32_t w = 256) {
     uint32_t e = opnQueue[opnQTail];
     opnQTail = (opnQTail + 1) % OPN_QUEUE;
@@ -377,15 +332,11 @@ public:
     else if (r < 0x10) ssgWrite(r, v); else ym2203WriteReg(fm, r, v);
   }
 
-  // 書き込みの時刻合わせ: 次に作るサンプルのエミュレーションの時刻 sndClock(CPU クロック)。1 サンプル
-  // 243.75 クロックずつ進め、時刻がそこまで来た書き込みを反映する。sndClock は CPU が終えた時刻
-  // (opnEmuClock)を越えない(越えそうなら止めて待つ = CPU が遅れたときは今までどおり届いたときに反映)。
-  // CPU が取り戻しで何フレームも続けて走り 1.25 フレームより先に行ったら、溜まった分をまとめて反映して追いつく
-  uint32_t sndClock = 0, sndFrac = 0;
+  uint32_t sndClock = 0, sndFrac = 0, clkPerSampleQ16 = 243u << 16;
   void advanceClock(int n, uint32_t emu) {
-    uint32_t f = sndFrac + (uint32_t)n * 49152u;        // 0.75 クロック = 49152 / 65536
-    sndClock += (uint32_t)n * 243u + (f >> 16);
-    sndFrac = f & 0xFFFF;
+    uint64_t f = sndFrac + (uint64_t)n * clkPerSampleQ16;
+    sndClock += (uint32_t)(f >> 16);
+    sndFrac = (uint32_t)(f & 0xFFFF);
     if ((int32_t)(sndClock - emu) > 0) { sndClock = emu; sndFrac = 0; }
   }
 
@@ -400,35 +351,29 @@ public:
     int space = (tail - head - 1 + SND_BUFFER_SIZE) % SND_BUFFER_SIZE;
     while (space > 0) {
       int n = space > 64 ? 64 : space;
-      // 時刻が来た書き込みを反映し、次の書き込みの時刻でブロックを切る
       while (opnQTail != opnQHead) {
         uint32_t t16 = opnQueue[opnQTail] >> 16;
-        int32_t d = (int16_t)(t16 - (sndClock >> 5));                 // 32 クロック単位
+        int32_t d = (int16_t)(t16 - (sndClock >> 5));
         if (d > 0) {
-          if ((int16_t)(t16 - (emu >> 5)) <= 0) {                     // (CPU がまだ終えていないラインの書き込みなら、今回は届かない)
-            int m = (int)(((d << 5) + 243) / 244);                    // そこまでのサンプル数(切り上げ)
+          if ((int16_t)(t16 - (emu >> 5)) <= 0) {
+            int m = (int)((((uint64_t)d << 21) + clkPerSampleQ16 - 1) / clkPerSampleQ16);
             if (m < n) n = m;
           }
           break;
         }
-        int32_t w = (-d * 32 * 256 + 122) / 244;                        // サンプルの中で書き込みのあとの長さ
+        int32_t w = (int32_t)(((uint64_t)(-d) << 29) / clkPerSampleQ16);
         applyQueued(w > 256 ? 256 : w);
       }
       advanceClock(n, emu);
       ym2203Generate(fm, fmBuf, n);
       for (int i = 0; i < n; i++) {
-        // FM 1ch 最大 ±64、SSG 1ch 最大 0〜85(振れ幅 FM 1ch の 2/3)。Common Source Project(fmgen、
-        // FM・PSG とも 0dB)と同じ比: fmgen の SSG 音量 15 は ±0x4000/3、FM のオペレータは最大 ±8192。
-        // (MAME の比 = SSG が FM の約2倍 にしたら Ys2 のオープニング後半の FM のメロディが SSG の伴奏に
-        //  埋もれた。その前の 1/3 では前半の SSG のメロディが FM の和音に埋もれていた)
-        // 直流をハイパスで取ってから、±96 を超えた分を 1/3 に縮め、±127 で切る
 #if FM_TREBLE_FIX
         fmLp += ((fmBuf[i] - fmLp) * FM_TREBLE_FIX) >> 8;
 #else
         fmLp = fmBuf[i];
 #endif
         int32_t x = ((fmLp >> 7) + ((ssgSample() * 171) >> 8)) << 8;
-        if (spk | singPend) {                          // スピーカー: BEEP の発振と SING の OR
+        if (spk | singPend) {
           int32_t lv;
           if (singPend) { lv = singArea + ((spk & 0x80) ? singRem : 0); singPend = false; }
           else lv = (spk & 0x80) ? 256 : 0;
@@ -456,26 +401,20 @@ public:
 };
 OpnGenerator opnGen;
 
-// SSG の I/O ポート A/B(R14/R15)の読み出し。ジョイスティック端子は再現しないので何もつないでいない値。
-// (R0〜R13 は pc88_core.cpp が CPU 側の写しから返す)
 uint8_t pc88SsgRead(uint8_t reg) {
   return reg >= 14 ? 0xFF : opnGen.ssgRead(reg);
 }
 
-// ---------------------------------------------------------------------------
-//  メモリ
-// ---------------------------------------------------------------------------
 #define NUM_DRIVES 2
 static Pc88Drive drives[NUM_DRIVES];
-static String drivePath[NUM_DRIVES];                 // 入っているファイル(SD のフルパス)
-static uint32_t driveOfs[NUM_DRIVES];                // そのイメージのファイルの中の位置(書き戻し用)
+static String drivePath[NUM_DRIVES];
+static uint32_t driveOfs[NUM_DRIVES];
 static Pc88Memory mem;
 static Pc88Config config;
 static volatile bool isPaused = false;
 
 static void flashStatus(const char *msg) { Serial.println(msg); }
 
-// 一時停止中などに画面のいちばん下に1行出す(ユーザー要望で上から下へ)
 static void showStatus(const char *msg) {
   canvas->selectFont(&fabgl::FONT_8x8);
   canvas->setBrushColor(fabgl::Color::Blue);
@@ -485,9 +424,6 @@ static void showStatus(const char *msg) {
   canvas->waitCompletion();
 }
 
-// ---------------------------------------------------------------------------
-//  SD
-// ---------------------------------------------------------------------------
 static uint8_t *loadRom(const char *path, uint32_t size, bool internal) {
   File f = SD.open(path, FILE_READ);
   if (!f) return nullptr;
@@ -506,7 +442,6 @@ static uint8_t *loadRom(const char *path, uint32_t size, bool internal) {
   return p;
 }
 
-
 static int listD88Images(const String &path, D88Image *out, int max) {
   File f = SD.open(path.c_str(), FILE_READ);
   if (!f) return 0;
@@ -518,7 +453,7 @@ static int listD88Images(const String &path, D88Image *out, int max) {
     uint32_t sz = h[0x1C] | (h[0x1D] << 8) | (h[0x1E] << 16) | ((uint32_t)h[0x1F] << 24);
     if (sz < 0x2B0 || o + sz > total) {
       if (n > 0) break;
-      sz = total - o;                              // 大きさが壊れている1枚もの: ファイル全体
+      sz = total - o;
     }
     out[n].ofs = o;
     out[n].size = sz;
@@ -531,7 +466,6 @@ static int listD88Images(const String &path, D88Image *out, int max) {
   return n;
 }
 
-// path(SD のフルパス)の image 枚目をドライブ d に入れる
 static bool loadD88ToDrive(int d, const String &path, int image) {
   Pc88Drive &drv = drives[d];
   D88Image imgs[D88_MAX_IMAGES];
@@ -555,7 +489,6 @@ static bool loadD88ToDrive(int d, const String &path, int image) {
   return ok;
 }
 
-// ドライブ d のイメージを、ファイルの元の位置へ書き戻す(ほかのイメージはそのまま)
 static void writeBackD88(int d) {
   if (drivePath[d] == "" || !drives[d].inserted) { showStatus("NO DISK"); return; }
   File f = SD.open(drivePath[d].c_str(), "r+");
@@ -566,10 +499,7 @@ static void writeBackD88(int d) {
   flashStatus(ok ? "D88 WRITTEN BACK" : "D88 WRITE BACK FAILED");
 }
 
-// ---------------------------------------------------------------------------
-//  ファイル選択と起動メニュー(MSX2 / X1 と同じ形)
-// ---------------------------------------------------------------------------
-struct D88Item { String name; int kind; };      // kind: 0 = ".." 1 = フォルダ 2 = D88 3 = <NONE>
+struct D88Item { String name; int kind; };
 static std::vector<D88Item> d88Items;
 static const char *ITEM_NONE = "<NONE>";
 
@@ -601,7 +531,6 @@ static void listD88Files(const String &path, bool canGoUp) {
   d88Items.insert(d88Items.end(), files.begin(), files.end());
 }
 
-// /PC88 の中の D88 を選ぶ(フォルダにも入れる)。返す値: /PC88 からの相対パス、"<NONE>"、ESC なら ""
 static String selectD88File(const char *title, const String &current) {
   const String base = "/PC88";
   String sub = "", want = current;
@@ -618,10 +547,8 @@ static String selectD88File(const char *title, const String &current) {
     int cursor = 0;
     for (int i = 0; i < (int)d88Items.size(); i++) if (d88Items[i].name == want) { cursor = i; break; }
     bool isBreak = false, isE0 = false, changeDir = false;
-    // 画面全体を描くのはフォルダに入ったときだけ。カーソルを動かしたら前と今の2行、
-    // スクロールしたら一覧の部分だけ描き直す(全部消して描くとちらつく)
     int shownTop = -1, shownCursor = -1;
-    int listTop = 0;                               // 一覧のいちばん上の項目(カーソルが画面の外に出たときだけ動かす)
+    int listTop = 0;
     auto drawItem = [&](int idx, int top) {
       int y = 36 + (idx - top) * 8;
       canvas->setBrushColor(fabgl::Color::Blue);
@@ -634,8 +561,6 @@ static String selectD88File(const char *title, const String &current) {
       canvas->drawText(16, y, label.c_str());
     };
     auto draw = [&]() {
-      // スクロールはカーソルが画面の上端・下端を越えたときだけ(以前は一番下まで行ってから上へ戻すと、
-      // カーソルの位置はそのままで、すぐ一覧のほうが動いた)
       if (cursor < listTop) listTop = cursor;
       if (cursor >= listTop + visible) listTop = cursor - visible + 1;
       int top = listTop;
@@ -661,7 +586,7 @@ static String selectD88File(const char *title, const String &current) {
     };
     draw();
     while (!changeDir) {
-      int jsc = 0;                                 // キーボードが無ければ1P のコントローラ
+      int jsc = 0;
       if (!kb->scancodeAvailable() && (jsc = joyMenuScancode(&isE0)) != 0) isBreak = false;
       if (jsc || kb->scancodeAvailable()) {
         int sc = jsc ? jsc : kb->getNextScancode(0);
@@ -694,12 +619,11 @@ static String selectD88File(const char *title, const String &current) {
   }
 }
 
-// 1つのファイルに何枚も入った D88 から1枚選ぶ。ESC なら -1
 static int selectD88Image(const char *title, const D88Image *imgs, int n, int current) {
   auto kb = PS2Controller.keyboard();
   int cursor = current < 0 || current >= n ? 0 : current;
   bool isBreak = false, isE0 = false, redraw = true;
-  int shownCursor = -1;                            // -1 = 画面全体を描く。あとは変わった2行だけ
+  int shownCursor = -1;
   canvas->selectFont(&fabgl::FONT_8x8);
   auto drawLine = [&](int i) {
     char line[48];
@@ -725,7 +649,7 @@ static int selectD88Image(const char *title, const D88Image *imgs, int n, int cu
       shownCursor = cursor;
       redraw = false;
     }
-    int jsc = 0;                                   // キーボードが無ければ1P のコントローラ
+    int jsc = 0;
     if (!kb->scancodeAvailable() && (jsc = joyMenuScancode(&isE0)) != 0) isBreak = false;
     if (jsc || kb->scancodeAvailable()) {
       int sc = jsc ? jsc : kb->getNextScancode(0);
@@ -743,15 +667,9 @@ static int selectD88Image(const char *title, const D88Image *imgs, int n, int cu
   }
 }
 
-// ドライブ d に入れるディスクを選ぶ(ファイル → 何枚目か)。file は /PC88 からの相対パス、"" = なし。
-// 選び直さなかった(ESC)ときは false。drive 1 で複数枚のファイルを選び、ドライブ2が空なら次の1枚をそちらへ
-// 選択画面は、いちばん最近どちらかのドライブに選んだディスクのフォルダから開く(ユーザー要望:
-// 片方のドライブでフォルダ(または何枚も入った D88)を選んだら、もう一方も同じところから)。
-// このドライブのディスクがそのフォルダにあればカーソルはそれに、なければ最近選んだファイルに置く。
-// もう一方のドライブと同じ「何枚も入った D88」を選んだときは、何枚目かの初期値をその次(ドライブ1 なら前)にする
 static String bootDisk[NUM_DRIVES];
 static int bootImage[NUM_DRIVES];
-static String lastChosen;                          // 最近選んだディスク(/PC88 からの相対パス)
+static String lastChosen;
 static String dirOf(const String &f) { int s = f.lastIndexOf('/'); return s >= 0 ? f.substring(0, s) : String(""); }
 
 static bool chooseDisk(int d, String &file, int &image, const String &otherFile, int otherImage) {
@@ -778,7 +696,6 @@ static bool chooseDisk(int d, String &file, int &image, const String &otherFile,
   return true;
 }
 
-// ドライブ d に今入っているディスク(/PC88 からの相対パスと何枚目か。なければ "")
 static void driveDisk(int d, String &file, int &image) {
   file = drivePath[d].startsWith("/PC88/") ? drivePath[d].substring(6) : String("");
   image = 0;
@@ -791,13 +708,10 @@ static void driveDisk(int d, String &file, int &image) {
 
 static const char *modeName[4] = { "N88-BASIC V2", "N88-BASIC V1 (S)", "N88-BASIC V1 (H)", "N-BASIC" };
 
-// 起動メニューの各行に出ている内容(選択の状態 + 文字)を覚えておき、変わった行だけ描き直す。
-// 毎回画面全体を消して描くとちらつく(ユーザー指摘)。0〜8 = 項目、9 = 案内、10 = メッセージ
 static char menuShown[11][100];
 static bool menuValid = false;
-static void bootMenuInvalidate() { menuValid = false; }   // ファイル選択などで画面を上書きしたあと
+static void bootMenuInvalidate() { menuValid = false; }
 
-// capture = 押されたキーを待っているボタン(4〜6。-1 = なし)
 static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
   const int X0 = 40, X1 = 599, Y0 = 36, DY = 13;
   canvas->selectFont(&fabgl::FONT_8x8);
@@ -828,12 +742,11 @@ static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
       default: continue;
     }
     bool sel = (i == cursor);
-    char shown[100];                               // 1 文字目 = 状態(N 通常 / S 選択 / C キー待ち)
+    char shown[100];
     snprintf(shown, sizeof(shown), "%c%s", sel ? (i == capture ? 'C' : 'S') : 'N', line);
     if (strcmp(shown, menuShown[i]) == 0) continue;
     strcpy(menuShown[i], shown);
     int y = Y0 + i * DY;
-    // 選択中は反転。キー待ちのボタンは黄色の地。行の地を塗ってから文字を書く
     canvas->setBrushColor(!sel ? fabgl::Color::Blue : i == capture ? fabgl::Color::BrightYellow : fabgl::Color::BrightWhite);
     canvas->fillRectangle(X0 - 4, y - 3, X1, y + 9);
     canvas->setPenColor(sel ? fabgl::Color::Blue : fabgl::Color::BrightWhite);
@@ -863,20 +776,20 @@ static void bootMenu() {
   bootMenuInvalidate();
   for (;;) {
     if (redraw) { bootMenuDraw(items[pos], msg, capture); redraw = false; }
-    int jsc = 0;                                   // キーボードが無ければ1P のコントローラ(キーの割り当て中は使わない)
+    int jsc = 0;
     if (capture < 0 && !kb->scancodeAvailable() && (jsc = joyMenuScancode(&isE0)) != 0) isBreak = false;
     if (jsc || kb->scancodeAvailable()) {
       int sc = jsc ? jsc : kb->getNextScancode(0);
       if (sc == 0xF0) { isBreak = true; continue; }
       if (sc == 0xE0) { isE0 = true; continue; }
-      if (!isBreak && capture >= 0) {              // ジョイスティックのボタンに割り当てるキー
+      if (!isBreak && capture >= 0) {
         for (int i = 0; i < pc88KeyMapCount; i++)
           if (pc88KeyMapTable[i].ps2 == sc && pc88KeyMapTable[i].ext == isE0) {
             joyButtonKey[capture - 4] = (uint8_t)((pc88KeyMapTable[i].row << 4) | pc88KeyMapTable[i].bit);
             joyChanged = true;
             break;
           }
-        capture = -1;                              // PC-8801 に無いキー(F6〜F12 など)なら取り消し
+        capture = -1;
         redraw = true;
       } else if (!isBreak) {
         if (sc == 0x75 && isE0) { pos = (pos + NITEMS - 1) % NITEMS; redraw = true; }
@@ -886,7 +799,7 @@ static void bootMenu() {
           int it = items[pos];
           msg = nullptr;
           if (it == 0 || it == 1) {
-            bootMenuInvalidate();                  // ファイル選択の画面で上書きされる
+            bootMenuInvalidate();
             if (chooseDisk(it, bootDisk[it], bootImage[it], bootDisk[it ^ 1], bootImage[it ^ 1]) && it == 0 && bootDisk[0] != "" && bootDisk[1] == "") {
               D88Image imgs[D88_MAX_IMAGES];
               if (bootImage[0] + 1 < listD88Images("/PC88/" + bootDisk[0], imgs, D88_MAX_IMAGES)) {
@@ -914,7 +827,6 @@ static void bootMenu() {
   canvas->clear();
 }
 
-// 一時停止中の F9 / F10: ドライブ d のディスクを入れ替える
 static void swapDisk(int d) {
   String file, other;
   int image, otherImage;
@@ -928,16 +840,17 @@ static void swapDisk(int d) {
   canvas->clear();
   showStatus("PAUSED  F12:RESUME  F10/F11:DISK  SHIFT+F10/F11:WRITE BACK  SHIFT+F12:RESET");
 }
-// ---------------------------------------------------------------------------
-//  キーボード: PS/2 → PC-8801 のキーマトリクス(ポート 00h〜0Eh)
-//  並びは PC88_REQUIREMENTS.md §3 の表。日本語 106 キーボードの位置に合わせる。
-// ---------------------------------------------------------------------------
 
 static void updateKeyboard() {
   static bool isBreak = false, isE0 = false, isShift = false, f12Held = false, f10Held = false, f11Held = false;
-  static bool resetArmed = false;                    // Shift+F12 で「書き戻していない」と知らせたあと
+  static bool resetArmed = false;
   auto kb = PS2Controller.keyboard();
   if (!kb) return;
+  {
+    static uint8_t ledShown = 0xFF;
+    const uint8_t led = (!(kbdKeys[0xA] & 0x80) ? 1 : 0) | (!(kbdKeys[0x8] & 0x20) ? 2 : 0);
+    if (led != ledShown) { ledShown = led; kb->setLEDs(false, (led & 1) != 0, (led & 2) != 0); }
+  }
   int count = kb->scancodeAvailable();
   while (count-- > 0) {
     int sc = kb->getNextScancode(0);
@@ -945,11 +858,10 @@ static void updateKeyboard() {
     if (sc == 0xF0) { isBreak = true; continue; }
     if (sc == 0xE0) { isE0 = true; continue; }
     if (sc == 0x12 || sc == 0x59) isShift = !isBreak;
-    if (sc == 0x07 && !isE0) {                       // F12: 一時停止 / Shift+F12: リセット
+    if (sc == 0x07 && !isE0) {
       if (!isBreak && !f12Held) {
         f12Held = true;
-        if (isShift) {                               // リセットは ESP32 ごと(ユーザー要望)
-          // SD に書き戻していないディスクの書き込みがあれば、1回目は止めて知らせる(2回目で再起動)
+        if (isShift) {
           bool dirty = false;
           for (int d = 0; d < NUM_DRIVES; d++) dirty |= drives[d].inserted && drives[d].dirty;
           if (dirty && !resetArmed) {
@@ -962,13 +874,13 @@ static void updateKeyboard() {
           isPaused = !isPaused;
           resetArmed = false;
           if (isPaused) { vTaskDelay(pdMS_TO_TICKS(40)); showStatus("PAUSED  F12:RESUME  F10/F11:DISK  SHIFT+F10/F11:WRITE BACK  SHIFT+F12:RESET"); }
-          else pc88VideoInvalidate();                // 一時停止の表示やディスク選択で上書きした画面を描き直す
+          else pc88VideoInvalidate();
         }
       } else if (isBreak) f12Held = false;
       isBreak = isE0 = false;
       continue;
     }
-    if ((sc == 0x09 || sc == 0x78) && !isE0) {      // 一時停止中の F10 / F11: ディスクの入れ替え、Shift で SD へ書き戻し(MSX2 と同じ)
+    if ((sc == 0x09 || sc == 0x78) && !isE0) {
       bool &held = (sc == 0x09) ? f10Held : f11Held;
       int d = (sc == 0x09) ? 0 : 1;
       if (!isBreak && !held) {
@@ -977,8 +889,6 @@ static void updateKeyboard() {
           if (isShift) writeBackD88(d);
           else {
             swapDisk(d);
-            // 選択画面がキーを離した信号を読んでしまうので、押したままの扱いを消す
-            // (残すと次の F10/F11 が1回目だけ無視される)。カナ・CAPS のロックは残す。
             held = isShift = false;
             for (int r = 0; r < 16; r++) {
               uint8_t keep = (r == 0x8) ? 0x20 : (r == 0xA) ? 0x80 : 0x00;
@@ -990,13 +900,12 @@ static void updateKeyboard() {
       isBreak = isE0 = false;
       continue;
     }
-    for (int i = 0; i < pc88KeyMapCount && (!isPaused || isBreak); i++) {   // 一時停止中は押下を伝えない(離したのは伝える)
+    for (int i = 0; i < pc88KeyMapCount && (!isPaused || isBreak); i++) {
       if (pc88KeyMapTable[i].ps2 == sc && pc88KeyMapTable[i].ext == isE0) {
         uint8_t row = pc88KeyMapTable[i].row, m = (uint8_t)(1 << pc88KeyMapTable[i].bit);
-        // カナ(08h bit5)と CAPS(0Ah bit7)は実機ではロック式のキー: 押すたびに入/切
         bool lock = (row == 0x8 && m == 0x20) || (row == 0xA && m == 0x80);
         if (lock) {
-          static bool held[2];                       // キーリピートで何度も切り替わらないように
+          static bool held[2];
           bool &h = held[row == 0xA ? 1 : 0];
           if (!isBreak && !h) { kbdKeys[row] ^= m; h = true; }
           else if (isBreak) h = false;
@@ -1009,11 +918,86 @@ static void updateKeyboard() {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  CPU タスク(コア0、262ライン/フレーム)
-// ---------------------------------------------------------------------------
+#if PC88_VGA_SYNC
+#include "soc/i2s_struct.h"
+static lldesc_t volatile *vgaDesc = nullptr;
+static int vgaDescCount = 0;
+static uint8_t *vgaDescRow = nullptr;
+
+static inline int vgaRowNow() {
+  uint32_t a = I2S1.out_link_dscr;
+  uint32_t i = (a - (uint32_t)vgaDesc) / sizeof(lldesc_t);
+  return i < (uint32_t)vgaDescCount ? vgaDescRow[i] : PC88_SCREEN_H;
+}
+
+static void vgaSyncSetup() {
+  lldesc_t volatile *start = (lldesc_t volatile *)I2S1.out_link_dscr;
+  if (!start) { Serial.println("VGA sync: off (no DMA descriptor)"); return; }
+  lldesc_t volatile *best = nullptr;
+  int bestLen = 0, n = 0;
+  lldesc_t volatile *d = start;
+  do {
+    if ((uint32_t)d < 0x3FF80000u || (uint32_t)d >= 0x40000000u) { Serial.println("VGA sync: off (bad descriptor)"); return; }
+    lldesc_t volatile *next = (lldesc_t volatile *)d->qe.stqe_next;
+    lldesc_t volatile *prevCont = d - 1;
+    bool head = true;
+    if ((uint32_t)prevCont >= 0x3FF80000u && (lldesc_t volatile *)prevCont->qe.stqe_next == d) head = false;
+    if (head) {
+      int len = 1;
+      lldesc_t volatile *e = d;
+      while ((lldesc_t volatile *)e->qe.stqe_next == e + 1 && len < 4096) { e++; len++; }
+      if (len > bestLen) { bestLen = len; best = d; }
+    }
+    d = next;
+    n++;
+  } while (d && d != start && n < 4096);
+  if (d != start || !best) { Serial.println("VGA sync: off (not a ring)"); return; }
+  vgaDescRow = (uint8_t *)heap_caps_malloc(bestLen, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+  if (!vgaDescRow) { Serial.println("VGA sync: off (no memory)"); return; }
+  int lastVis = -1, row = 0, views = 0;
+  for (int i = 0; i < bestLen; i++) {
+    const volatile uint8_t *b = (const volatile uint8_t *)best[i].buf;
+    for (int y = 0; y < PC88_SCREEN_H; y++) if (b == pc88_rows[y]) { row = y; lastVis = i; views++; break; }
+    vgaDescRow[i] = (uint8_t)row;
+  }
+  for (int i = lastVis + 2; i < bestLen; i++) vgaDescRow[i] = PC88_SCREEN_H;
+  if (views < PC88_SCREEN_H) {
+    Serial.printf("VGA sync: off (%d of %d descriptors are rows)\n", views, bestLen);
+    heap_caps_free(vgaDescRow); vgaDescRow = nullptr;
+    return;
+  }
+  vgaDesc = best;
+  vgaDescCount = bestLen;
+  int seenVis = 0, seenBlank = 0;
+  for (int64_t t0 = esp_timer_get_time(); esp_timer_get_time() - t0 < 20000; ) {
+    if (vgaRowNow() < PC88_SCREEN_H) seenVis++; else seenBlank++;
+    ets_delay_us(50);
+  }
+  if (!seenVis || !seenBlank) {
+    Serial.printf("VGA sync: off (position test failed: visible %d, blank %d)\n", seenVis, seenBlank);
+    vgaDesc = nullptr;
+    return;
+  }
+  Serial.printf("VGA sync: on (%d desc, %d rows, test visible %d / blank %d)\n", bestLen, views, seenVis, seenBlank);
+}
+static void vgaWaitVblank(int64_t frameStart) {
+  for (;;) {
+    int64_t el = esp_timer_get_time() - frameStart;
+    if (el >= PC88_FRAME_REAL_US + 1500) return;
+    if (el < PC88_FRAME_REAL_US / 2) {
+      vTaskDelay(pdMS_TO_TICKS((PC88_FRAME_REAL_US / 2 - el) / 1000 + 1));
+      continue;
+    }
+    int r = vgaRowNow();
+    if (r >= PC88_SCREEN_H) return;
+    int us = (PC88_SCREEN_H - r) * 64;
+    if (us > 2500) vTaskDelay(pdMS_TO_TICKS(us / 1000 - 1));
+  }
+}
+#endif
+
 void cpuTask(void *) {
-  const int64_t frameUs = PC88_FRAME_US;             // 24kHz モニタの 55.4Hz
+  const int64_t frameUs = PC88_FRAME_REAL_US;
   int64_t next = esp_timer_get_time();
 #ifdef USE_SERIAL_DEBUG
   uint32_t sum = 0, mx = 0, over = 0, n = 0;
@@ -1038,16 +1022,14 @@ void cpuTask(void *) {
       ExecZ80(&cpu, CPU_CYCLES_PER_LINE);
 #endif
       pc88Line(i);
-      opnEmuClock += CPU_CYCLES_PER_LINE;              // 音の書き込みの時刻(このラインまで終わった)
+      opnEmuClock += CPU_CYCLES_PER_LINE;
       if (i == PC88_DISPLAY_LINES) frameReady = true;
       if (pc88IrqPending() && (cpu.IFF & IFF_1)) IntZ80(&cpu, pc88IrqAck());
     }
     updateJoystick();
-    joyToKeys();                                     // キーボード + ジョイスティック → pc88_key
+    joyToKeys();
     int64_t now = esp_timer_get_time();
 #ifdef USE_SERIAL_DEBUG
-    // 内訳: z80 = 本体の Z80(その中で 8255 を読み書きしたときのディスクユニットの Z80 も含む)、
-    //       render = 描画、disk = 行末のディスクユニット(サブの Z80 と FDC)
     static uint64_t zSum, rSum, dSum, lSum;
     zSum += z80Clk; rSum += pc88ProfRender; dSum += pc88ProfDisk; lSum += pc88LinesDrawn;
     pc88ProfRender = pc88ProfDisk = 0;
@@ -1062,6 +1044,13 @@ void cpuTask(void *) {
     }
 #endif
     int64_t wait = next - now;
+#if PC88_VGA_SYNC
+    if (vgaDesc) {
+      if (wait > 0) vgaWaitVblank(next - frameUs);
+      next = esp_timer_get_time();
+      continue;
+    }
+#endif
     if (wait > 0) {
       if (wait >= 1000) vTaskDelay(pdMS_TO_TICKS(wait / 1000));
       while (esp_timer_get_time() < next) asm volatile("nop");
@@ -1071,9 +1060,6 @@ void cpuTask(void *) {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  setup / loop
-// ---------------------------------------------------------------------------
 #define HEAPLOG(tag) Serial.printf("HEAP[%-10s] free=%6u largest=%6u\n", (tag), \
     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL), \
     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL))
@@ -1093,14 +1079,16 @@ void setup() {
   PS2Controller.keyboard()->begin(GPIO_NUM_33, GPIO_NUM_32, false, false);
   Serial1.begin(115200, SERIAL_8N1, 39, -1);
 
-  // 画面: 640x200 を VGA 640x480@60Hz の同期で出す(X1 と同じ。DoubleScan で 400 ライン)。
-  // ビューポート(約128KB の内部 DMA RAM)はほかの内部 RAM より先に確保する
   DisplayController.begin();
-  DisplayController.setResolution("\"640x200@60Hz\" 25.175 640 656 752 800 200 225 226 262 -HSync -VSync DoubleScan",
-                                  -1, -1, false);
+  {
+    static char mode[96];
+    const int vfp = 225 + (PC88_VGA_VTOTAL - 262) / 2;
+    snprintf(mode, sizeof(mode), "\"640x200\" 25.175 640 656 752 800 200 %d %d %d -HSync -VSync DoubleScan", vfp, vfp + 1, PC88_VGA_VTOTAL);
+    DisplayController.setResolution(mode, -1, -1, false);
+    Serial.printf("VGA: %s (%.2fHz)\n", mode, 25175000.0 / 800 / (2 * PC88_VGA_VTOTAL));
+  }
   HEAPLOG("after VGA");
 
-  // メイン RAM: 16KB ずつ、入るものだけ内部 RAM に(X1 と同じ)
   const size_t RESERVE = 24 * 1024;
   const int order[4] = { 3, 0, 1, 2 };
   for (int i = 0; i < 4; i++) {
@@ -1112,7 +1100,7 @@ void setup() {
     mem.ram_page[pg] = p;
   }
   for (int i = 0; i < 3; i++) mem.gvram[i] = (uint8_t *)ps_malloc(0x4000);
-  mem.tvram = (uint8_t *)heap_caps_malloc(0x1000, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);   // テキスト(毎行読む)
+  mem.tvram = (uint8_t *)heap_caps_malloc(0x1000, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
   if (!mem.tvram) mem.tvram = (uint8_t *)ps_malloc(0x1000);
   mem.subram = (uint8_t *)ps_malloc(0x4000);
   for (int d = 0; d < NUM_DRIVES; d++) {
@@ -1133,7 +1121,6 @@ void setup() {
   soundGenerator.setVolume(100);
   soundGenerator.play(true);
 
-  // ROM
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
   bool sdOK = SD.begin(SD_CS, SPI);
   if (sdOK) {
@@ -1141,7 +1128,7 @@ void setup() {
     static const char *ext[4] = { "/PC88/N88_0.ROM", "/PC88/N88_1.ROM", "/PC88/N88_2.ROM", "/PC88/N88_3.ROM" };
     for (int i = 0; i < 4; i++) mem.n88ext[i] = loadRom(ext[i], 0x2000, false);
     mem.n80rom = loadRom("/PC88/N80.ROM", 0x8000, false);
-    mem.diskrom = loadRom("/PC88/DISK.ROM", 0x2000, false);   // 2KB の ROM なら残りは FFh
+    mem.diskrom = loadRom("/PC88/DISK.ROM", 0x2000, false);
     mem.kanji1 = loadRom("/PC88/KANJI1.ROM", 0x20000, false);
     mem.kanji2 = loadRom("/PC88/KANJI2.ROM", 0x20000, false);
   }
@@ -1154,7 +1141,6 @@ void setup() {
   loadJoyKeys();
   bootMenu();
 
-  // ビューポートの行(以降は canvas を使わず直接書く)
   DisplayController.processPrimitives();
   pc88_rows = (uint8_t **)heap_caps_malloc(sizeof(uint8_t *) * PC88_SCREEN_H, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
   for (int y = 0; y < PC88_SCREEN_H; y++) {
@@ -1164,6 +1150,9 @@ void setup() {
       while (1) delay(1000);
     }
   }
+#if PC88_VGA_SYNC
+  vgaSyncSetup();
+#endif
 
   pc88Init(mem, config);
   memset(&cpu, 0, sizeof(cpu));

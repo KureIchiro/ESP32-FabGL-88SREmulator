@@ -10,18 +10,12 @@
 void (*upd765CmdHook)(const uint8_t *cmd, int len);
 void (*upd765ResultHook)(const uint8_t *res, int len);
 
-// ---------------------------------------------------------------------------
-//  D88
-// ---------------------------------------------------------------------------
 static inline uint32_t rd32le(const uint8_t *p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static inline uint16_t rd16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
-// D88 のセクタヘッダ(16バイト): C H R N / セクタ数(2) / 密度 / 削除 / 状態 / 予約(5) / サイズ(2)
 enum { SH_C = 0, SH_H = 1, SH_R = 2, SH_N = 3, SH_NSEC = 4, SH_DENS = 6, SH_DEL = 7, SH_STAT = 8, SH_SIZE = 14 };
-// 状態(SH_STAT): 00 正常 / 10 削除データ / A0 ID の CRC エラー / B0 データの CRC エラー /
-//                E0 アドレスマークなし / F0 データマークなし
 #define ST_ID_CRC   0xA0
 #define ST_DATA_CRC 0xB0
 #define ST_NO_AM    0xE0
@@ -34,8 +28,6 @@ bool pc88LoadD88(Pc88Drive &drv, const uint8_t *fileBuf, uint32_t fileSize) {
   drv.size = fileSize;
   drv.protect = (b[0x1A] & 0x10) != 0;
   drv.dirty = false;
-  // トラック表を辿り、各トラックのセクタ数を数える(ヘッダのセクタ数は信用せず、
-  // ファイルの範囲と次のトラックの先頭で止める)
   uint32_t end = rd32le(&b[0x1C]);
   if (end == 0 || end > fileSize) end = fileSize;
   for (int t = 0; t < PC88_D88_TRACKS; t++) {
@@ -70,9 +62,6 @@ void pc88EjectD88(Pc88Drive &drv) {
   for (int t = 0; t < PC88_D88_TRACKS; t++) { drv.trk_ofs[t] = 0; drv.trk_nsec[t] = 0; }
 }
 
-// ---------------------------------------------------------------------------
-//  FDC の状態
-// ---------------------------------------------------------------------------
 enum Phase { PH_CMD, PH_READ, PH_WRITE, PH_FORMAT, PH_SECTOR_END, PH_RESULT };
 
 static Pc88Drive *drives;
@@ -82,26 +71,25 @@ static uint8_t  cmd[9];
 static int      cmdLen, cmdNeed;
 static uint8_t  res[7];
 static int      resLen, resPos;
-static bool     nonDma = true;            // SPECIFY の ND
-static uint8_t  pcn[4];                   // ヘッドのいるシリンダ
-static uint8_t  rot[4];                   // 回転の位置(次に来るセクタの番号)
-static bool     seekEnd[4];               // シーク/リキャリブレートの完了(SENSE INT で消える)
+static bool     nonDma = true;
+static uint8_t  pcn[4];
+static uint8_t  rot[4];
+static bool     seekEnd[4];
 static uint8_t  seekSt0[4];
-static bool     resultIrq;                // 結果の段階に入った(結果を読み始めると消える)
-static bool     tc;                       // ターミナルカウントを受けた
+static bool     resultIrq;
+static bool     tc;
 
-// 実行中のコマンドの情報
-static int      drv, head;                // ドライブ / 面(HD)
+static int      drv, head;
 static uint8_t  C, H, R, N, EOT, DTL;
-static bool     mt, mfm, sk, deleted;     // MT / MF / SK / 削除データ系のコマンド
+static bool     mt, mfm, sk, deleted;
 static uint8_t  st0, st1, st2;
-static uint8_t *dataPtr;                  // 転送中のセクタのデータ(D88 の中)
+static uint8_t *dataPtr;
 static uint32_t dataLen, dataAvail, dataPos;
-static uint32_t curHdr;                   // 転送中のセクタのヘッダの位置
-static int      waitUs;                   // PH_SECTOR_END: TC を待つ残り時間
-static bool     endAfterSector;           // このセクタで終わる(CRC エラー・削除マーク)
-static bool     xferWrite;                // 実行中のコマンドは書き込み系
-static uint8_t  fmtBuf[4 * 64];           // FORMAT で受け取った ID
+static uint32_t curHdr;
+static int      waitUs;
+static bool     endAfterSector;
+static bool     xferWrite;
+static uint8_t  fmtBuf[4 * 64];
 static int      fmtCount, fmtNeed;
 static uint8_t  fmtN, fmtSC, fmtD;
 
@@ -110,7 +98,6 @@ static inline Pc88Drive *curDrive() {
 }
 static inline int trackSlot(int d, int h) { return pcn[d] * 2 + h; }
 
-// トラックの n 番目のセクタヘッダの位置(無ければ 0)
 static uint32_t sectorHeader(const Pc88Drive &d, int slot, int n) {
   if (slot < 0 || slot >= PC88_D88_TRACKS || n >= d.trk_nsec[slot]) return 0;
   uint32_t pos = d.trk_ofs[slot];
@@ -126,13 +113,10 @@ static int cmdLength(uint8_t c) {
     case 0x08: return 1;
     case 0x0D: return 6;
     case 0x0F: return 3;
-    default: return 1;                    // 無効コマンド
+    default: return 1;
   }
 }
 
-// ---------------------------------------------------------------------------
-//  結果
-// ---------------------------------------------------------------------------
 static void result(const uint8_t *r, int n, bool irq) {
   memcpy(res, r, n);
   resLen = n;
@@ -142,7 +126,6 @@ static void result(const uint8_t *r, int n, bool irq) {
   if (upd765ResultHook) upd765ResultHook(res, n);
 }
 
-// 読み書き系の終わり。C/H/R/N はデータシートの表どおり、最後に扱ったセクタの次の ID
 static void finishRW() {
   uint8_t c = C, h = H, r = R;
   if (R == EOT && !(st0 & 0xC0)) {
@@ -161,11 +144,6 @@ static void abnormal(uint8_t s1, uint8_t s2) {
   result(out, 7, true);
 }
 
-// ---------------------------------------------------------------------------
-//  セクタを探す / 転送を始める
-// ---------------------------------------------------------------------------
-// ヘッドの位置のトラックで ID が C/H/R/N のセクタを回転の順に探す。
-// 見つかればヘッダの位置、無ければ 0(*missingAm = トラックにセクタが1つも無い)
 static uint32_t findSector(bool *missingAm, bool *badCyl) {
   Pc88Drive *d = curDrive();
   *missingAm = true;
@@ -178,7 +156,7 @@ static uint32_t findSector(bool *missingAm, bool *badCyl) {
     uint32_t h = sectorHeader(*d, slot, k);
     const uint8_t *sh = &d->buffer[h];
     bool fm = (sh[SH_DENS] & 0x40) != 0;
-    if (fm == mfm) continue;              // 密度が違う ID は読めない
+    if (fm == mfm) continue;
     if (sh[SH_STAT] == ST_NO_AM) continue;
     *missingAm = false;
     if (sh[SH_R] != R || sh[SH_N] != N || sh[SH_H] != H) continue;
@@ -194,26 +172,26 @@ static void startSector() {
   Pc88Drive *d = curDrive();
   if (!d) { st0 = 0x48; uint8_t out[7] = { (uint8_t)(0x48 | (head << 2) | drv), 0, 0, C, H, R, N }; result(out, 7, true); return; }
   bool write = (phase == PH_WRITE);
-  if (write && d->protect) { abnormal(0x02, 0); return; }         // NW
+  if (write && d->protect) { abnormal(0x02, 0); return; }
   bool noAm, badCyl;
   uint32_t h = findSector(&noAm, &badCyl);
-  if (!h) { abnormal(noAm ? 0x01 : 0x04, badCyl ? (C == 0xFF ? 0x02 : 0x10) : 0); return; }   // MA / ND (BC / WC)
+  if (!h) { abnormal(noAm ? 0x01 : 0x04, badCyl ? (C == 0xFF ? 0x02 : 0x10) : 0); return; }
   const uint8_t *sh = &d->buffer[h];
   endAfterSector = false;
   if (!write) {
-    if (sh[SH_STAT] == ST_NO_DAM) { abnormal(0x01, 0x01); return; }   // MA + MD
+    if (sh[SH_STAT] == ST_NO_DAM) { abnormal(0x01, 0x01); return; }
     bool del = (sh[SH_DEL] & 0x10) != 0;
-    if (del != deleted) {                 // 違う種類のデータマーク
-      if (sk) {                           // 飛ばして次のセクタへ
+    if (del != deleted) {
+      if (sk) {
         if (R == EOT) { abnormal(0x80, 0); return; }
         R++;
         startSector();
         return;
       }
-      st2 |= 0x40;                        // CM: このセクタを読んで終わる
+      st2 |= 0x40;
       endAfterSector = true;
     }
-    if (sh[SH_STAT] == ST_DATA_CRC) { st1 |= 0x20; st2 |= 0x20; endAfterSector = true; }   // DE / DD
+    if (sh[SH_STAT] == ST_DATA_CRC) { st1 |= 0x20; st2 |= 0x20; endAfterSector = true; }
   }
   curHdr = h;
   dataPtr = &d->buffer[h + 16];
@@ -222,7 +200,6 @@ static void startSector() {
   dataPos = 0;
 }
 
-// 1セクタ終わった。TC が来ていれば正常終了、来ていなければ少し待つ(実機は CRC を読む間 TC を見る)
 static void sectorDone() {
   if (phase == PH_WRITE) {
     Pc88Drive *d = curDrive();
@@ -237,11 +214,10 @@ static void sectorDone() {
   waitUs = 200;
 }
 
-// TC を待ち終わった: 次のセクタへ進む(EOT なら EN で終わる)
 static void nextSector(bool write) {
   if (R == EOT) {
     if (mt && !(head & 1)) { head = 1; H ^= 1; R = 1; }
-    else { abnormal(0x80, 0); return; }   // EN
+    else { abnormal(0x80, 0); return; }
   } else {
     R++;
   }
@@ -249,9 +225,6 @@ static void nextSector(bool write) {
   startSector();
 }
 
-// ---------------------------------------------------------------------------
-//  コマンドの実行
-// ---------------------------------------------------------------------------
 static void execCommand() {
   uint8_t c = cmd[0];
   if (upd765CmdHook) upd765CmdHook(cmd, cmdLen);
@@ -260,32 +233,32 @@ static void execCommand() {
   if (cmdLen > 1) { drv = cmd[1] & 3; head = (cmd[1] >> 2) & 1; }
   tc = false;
   switch (op) {
-    case 0x03:                            // SPECIFY
+    case 0x03:
       nonDma = (cmd[2] & 1) != 0;
       phase = PH_CMD;
       return;
-    case 0x04: {                          // SENSE DRIVE STATUS
+    case 0x04: {
       Pc88Drive *d = curDrive();
-      uint8_t st3 = (uint8_t)((head << 2) | drv | 0x08);         // 両面ドライブ
-      if (d) st3 |= 0x20;                                        // RY
-      if (pcn[drv] == 0) st3 |= 0x10;                            // T0
-      if (d && d->protect) st3 |= 0x40;                          // WP
+      uint8_t st3 = (uint8_t)((head << 2) | drv | 0x08);
+      if (d) st3 |= 0x20;
+      if (pcn[drv] == 0) st3 |= 0x10;
+      if (d && d->protect) st3 |= 0x40;
       result(&st3, 1, false);
       return;
     }
-    case 0x07:                            // RECALIBRATE
+    case 0x07:
       pcn[drv] = 0;
       seekEnd[drv] = true;
       seekSt0[drv] = (uint8_t)(0x20 | drv);
       phase = PH_CMD;
       return;
-    case 0x0F:                            // SEEK
+    case 0x0F:
       pcn[drv] = cmd[2];
       seekEnd[drv] = true;
-      seekSt0[drv] = (uint8_t)(0x20 | drv);  // ST0 の HD は 0(MAME と同じ。Ys のローダーが調べる)
+      seekSt0[drv] = (uint8_t)(0x20 | drv);
       phase = PH_CMD;
       return;
-    case 0x08: {                          // SENSE INTERRUPT STATUS
+    case 0x08: {
       for (int d = 0; d < 4; d++)
         if (seekEnd[d]) {
           seekEnd[d] = false;
@@ -297,7 +270,7 @@ static void execCommand() {
       result(&inv, 1, false);
       return;
     }
-    case 0x0A: {                          // READ ID
+    case 0x0A: {
       Pc88Drive *d = curDrive();
       st0 = st1 = st2 = 0;
       if (!d) { uint8_t out[7] = { (uint8_t)(0x48 | (head << 2) | drv), 0, 0, 0, 0, 0, 0 }; result(out, 7, true); return; }
@@ -312,12 +285,12 @@ static void execCommand() {
         result(out, 7, true);
         return;
       }
-      uint8_t out[7] = { (uint8_t)(0x40 | (head << 2) | drv), 0x01, 0, 0, 0, 0, 0 };   // MA
+      uint8_t out[7] = { (uint8_t)(0x40 | (head << 2) | drv), 0x01, 0, 0, 0, 0, 0 };
       result(out, 7, true);
       return;
     }
-    case 0x06: case 0x0C: case 0x05: case 0x09:   // READ DATA / READ DELETED / WRITE DATA / WRITE DELETED
-    case 0x02:                                    // READ DIAGNOSTIC は READ DATA と同じに扱う(簡略)
+    case 0x06: case 0x0C: case 0x05: case 0x09:
+    case 0x02:
       C = cmd[2]; H = cmd[3]; R = cmd[4]; N = cmd[5]; EOT = cmd[6]; DTL = cmd[8];
       st0 = st1 = st2 = 0;
       deleted = (op == 0x0C || op == 0x09);
@@ -325,7 +298,7 @@ static void execCommand() {
       phase = (op == 0x05 || op == 0x09) ? PH_WRITE : PH_READ;
       startSector();
       return;
-    case 0x0D: {                          // FORMAT TRACK
+    case 0x0D: {
       Pc88Drive *d = curDrive();
       fmtN = cmd[2]; fmtSC = cmd[3]; fmtD = cmd[5];
       st0 = st1 = st2 = 0;
@@ -337,7 +310,7 @@ static void execCommand() {
       phase = PH_FORMAT;
       return;
     }
-    default: {                            // SCAN 系と無効コマンド
+    default: {
       uint8_t inv = 0x80;
       result(&inv, 1, false);
       return;
@@ -345,8 +318,6 @@ static void execCommand() {
   }
 }
 
-// FORMAT: 受け取った ID でトラックを書き直す。D88 の並びを変えずに済む場合だけ
-// (セクタ数とサイズが今のトラックと同じ)。それ以外は書き込み禁止扱いで失敗させる。
 static void finishFormat() {
   Pc88Drive *d = curDrive();
   int slot = trackSlot(drv, head);
@@ -369,9 +340,6 @@ static void finishFormat() {
   result(out, 7, true);
 }
 
-// ---------------------------------------------------------------------------
-//  レジスタ
-// ---------------------------------------------------------------------------
 void upd765Init(Pc88Drive *d, int n) { drives = d; numDrives = n; upd765Reset(); }
 
 void upd765Reset() {
@@ -389,12 +357,12 @@ uint8_t upd765ReadStatus() {
   uint8_t busy = 0;
   for (int d = 0; d < 4; d++) if (seekEnd[d]) busy |= (uint8_t)(1 << d);
   switch (phase) {
-    case PH_CMD:        return (uint8_t)(0x80 | (cmdLen ? 0x10 : 0) | busy);   // RQM
-    case PH_READ:       return (uint8_t)(0x80 | 0x40 | 0x20 | 0x10 | busy);    // RQM DIO EXM CB
+    case PH_CMD:        return (uint8_t)(0x80 | (cmdLen ? 0x10 : 0) | busy);
+    case PH_READ:       return (uint8_t)(0x80 | 0x40 | 0x20 | 0x10 | busy);
     case PH_WRITE:
-    case PH_FORMAT:     return (uint8_t)(0x80 | 0x20 | 0x10 | busy);           // RQM EXM CB
-    case PH_SECTOR_END: return (uint8_t)(0x20 | 0x10 | busy);                  // 次のセクタ待ち(RQM なし)
-    case PH_RESULT:     return (uint8_t)(0x80 | 0x40 | 0x10 | busy);           // RQM DIO CB
+    case PH_FORMAT:     return (uint8_t)(0x80 | 0x20 | 0x10 | busy);
+    case PH_SECTOR_END: return (uint8_t)(0x20 | 0x10 | busy);
+    case PH_RESULT:     return (uint8_t)(0x80 | 0x40 | 0x10 | busy);
   }
   return 0x80;
 }
@@ -407,7 +375,7 @@ uint8_t upd765ReadData() {
     return v;
   }
   if (phase == PH_READ) {
-    uint8_t v = (dataPos < dataAvail) ? dataPtr[dataPos] : 0x4E;   // D88 に無いぶんはギャップの値
+    uint8_t v = (dataPos < dataAvail) ? dataPtr[dataPos] : 0x4E;
     if (++dataPos >= dataLen) sectorDone();
     return v;
   }
@@ -438,7 +406,6 @@ void upd765TC() {
   tc = true;
   if (phase == PH_SECTOR_END) { finishRW(); return; }
   if (phase == PH_READ || phase == PH_WRITE) {
-    // セクタの途中で止めた: そのセクタの終わりで正常終了する(残りのデータは捨てる)
     if (phase == PH_WRITE) { Pc88Drive *d = curDrive(); if (d) d->dirty = true; }
     finishRW();
   }
@@ -447,7 +414,7 @@ void upd765TC() {
 bool upd765Irq() {
   if (resultIrq) return true;
   for (int d = 0; d < 4; d++) if (seekEnd[d]) return true;
-  if (nonDma && (phase == PH_READ || phase == PH_WRITE || phase == PH_FORMAT)) return true;   // 1バイトごとの要求
+  if (nonDma && (phase == PH_READ || phase == PH_WRITE || phase == PH_FORMAT)) return true;
   return false;
 }
 

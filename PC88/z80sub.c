@@ -20,8 +20,6 @@
 #define DebugZ80  DebugZ80Sub
 #define LoopZ80   LoopZ80Sub
 
-/* 本体側でデバッガ(DEBUG)を有効にしていても、こちらは命令トレースを呼ばない
-   (PC のテスト環境で PC88_SUB_TRACE を付けたときだけ DebugZ80Sub を呼ぶ) */
 #if defined(DEBUG) && !defined(PC88_SUB_TRACE)
 #undef DEBUG
 #endif

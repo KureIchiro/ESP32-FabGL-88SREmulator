@@ -60,9 +60,6 @@ static const byte Z80_TABLE_ATTR CyclesCB[256] =
    8, 8, 8, 8, 8, 8,15, 8, 8, 8, 8, 8, 8, 8,15, 8
 };
 
-/* ED の未定義命令: OUT (C),0(ED 71)は 12、NEG・RETN・IM の別コードはもとの命令と同じ、それ以外の空きコードは
-   8 サイクルの NOP(以前はどれも 0 サイクルだった)。B0〜B3・B8〜BB(LDIR など)は繰り返しの中で数えるので 0、
-   FE は PatchZ80 なのでそのまま */
 static const byte Z80_TABLE_ATTR CyclesED[256] =
 {
    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
@@ -196,7 +193,6 @@ static const byte Z80_TABLE_ATTR PZSTable[256] =
   S_FLAG|P_FLAG,S_FLAG,S_FLAG,S_FLAG|P_FLAG
 };
 
-/* DAATable(4KB)は DAA 命令でしか引かないのでフラッシュのまま(内部RAMを4KB節約) */
 static const zword DAATable[2048] =
 {
   0x0044,0x0100,0x0200,0x0304,0x0400,0x0504,0x0604,0x0700,
