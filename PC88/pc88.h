@@ -9,6 +9,7 @@
 #define PC88_CPU_CLOCK       3993600
 #define PC88_CYCLES_PER_LINE 322
 #define PC88_FRAME_US        18061
+#define PC88_CYCLES_8MHZ     515
 
 #ifdef ARDUINO
   #include <esp_attr.h>
@@ -40,6 +41,7 @@ struct Pc88Config {
   bool rows20 = false;
   bool cols40 = false;
   bool diskBoot = true;
+  bool cpu8MHz = false;
 };
 
 extern "C" {

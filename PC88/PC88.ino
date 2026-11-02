@@ -15,6 +15,7 @@
  *  【操作】(MSX / MSX2 版と同じ)
  *   F12 一時停止 / Shift+F12 リセット(ESP32 ごと再起動して起動メニューから)
  *   一時停止中に F10 / F11 でドライブ1 / 2 のディスクを入れ替え、Shift+F10 / F11 で SD へ書き戻し
+ *   起動メニューの Clock で本体の Z80 を 4MHz / 8MHz にする(PSRAM の回避策なしで組み立てたときだけ。下の PC88_CLOCK_SWITCH)
  *
  *  【ジョイスティック】(いつも有効)1P の方向 = テンキー 8 / 2 / 4 / 6、ボタン1〜3 = 起動メニューの
  *   Joy B1〜B3 で決めたキー(Enter で反転 → 次に押したキーを割り当て。/PC88/JOYKEY.CFG に保存)。
@@ -33,18 +34,34 @@
 #include <algorithm>
 #include "soc/rtc_wdt.h"
 #include "esp_task_wdt.h"
+#ifndef BOARD_HAS_PSRAM
+#include "esp32/spiram.h"
+#include "esp_heap_caps.h"
+#define ps_malloc(n) heap_caps_malloc((n), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#endif
+#if defined(BOARD_HAS_PSRAM) && !defined(EMU_PSRAM_NO_ERRATA_FIX)
+#define psramFixMissing() false
+#else
+#define psramFixMissing() (ESP.getChipRevision() < 3)
+#endif
 #include "Z80.h"
 #include "pc88.h"
 #include "ym2203.h"
 
-#define USE_SERIAL_DEBUG
+//#define USE_SERIAL_DEBUG
 
 #define SD_SCLK 14
 #define SD_MISO 2
+//#define SD_MISO 35  // ORANGE ESPer
 #define SD_MOSI 12
 #define SD_CS 13
 
 #define CPU_CYCLES_PER_LINE PC88_CYCLES_PER_LINE
+#if !defined(BOARD_HAS_PSRAM) || defined(EMU_PSRAM_NO_ERRATA_FIX)
+#define PC88_CLOCK_SWITCH 1
+#else
+#define PC88_CLOCK_SWITCH 0
+#endif
 
 #define PC88_VGA_HZ 55
 #if PC88_VGA_HZ == 55
@@ -80,8 +97,11 @@ byte IRAM_ATTR InZ80(zword Port) { return pc88In(Port); }
 void IRAM_ATTR OutZ80(zword Port, byte Value) { pc88Out(Port, Value); }
 void PatchZ80(Z80 *R) {}
 
+static int cpuLineCycles = CPU_CYCLES_PER_LINE;
+
 int pc88LineCycle() {
-  int c = CPU_CYCLES_PER_LINE - cpu.ICount;
+  int c = cpuLineCycles - cpu.ICount;
+  if (cpuLineCycles != CPU_CYCLES_PER_LINE) c = c * CPU_CYCLES_PER_LINE / cpuLineCycles;
   return c < 0 ? 0 : c >= CPU_CYCLES_PER_LINE ? CPU_CYCLES_PER_LINE - 1 : c;
 }
 
@@ -98,8 +118,9 @@ uint8_t pc88NativeColor(int r, int g, int b) {
 }
 
 static volatile uint8_t joyMsx[2] = { 0x7F, 0x7F };
-static void updateJoystick() {
+static void updateJoystick(bool hold) {
   uint8_t j[2] = { 0x7F, 0x7F };
+  if (hold) { j[0] = joyMsx[0]; j[1] = joyMsx[1]; }
   while (Serial1.available() > 0) {
     uint8_t b = Serial1.read();
     j[(b & 0x80) ? 1 : 0] = b & 0x7F;
@@ -734,6 +755,9 @@ static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
         break;
       }
       case 2: snprintf(line, sizeof(line), "Mode  : %s", modeName[config.mode]); break;
+#if PC88_CLOCK_SWITCH
+      case 3: snprintf(line, sizeof(line), "Clock : %s", config.cpu8MHz ? "8MHz" : "4MHz"); break;
+#endif
       case 4: case 5: case 6:
         if (i == capture) snprintf(line, sizeof(line), "Joy B%d: PRESS A KEY...", i - 3);
         else snprintf(line, sizeof(line), "Joy B%d: %s", i - 3, pc88KeyName(joyButtonKey[i - 4]));
@@ -768,8 +792,12 @@ static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
 
 static void bootMenu() {
   auto kb = PS2Controller.keyboard();
-  const int items[7] = { 0, 1, 2, 4, 5, 6, 8 };
-  const int NITEMS = 7;
+#if PC88_CLOCK_SWITCH
+  const int items[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
+#else
+  const int items[] = { 0, 1, 2, 4, 5, 6, 8 };
+#endif
+  const int NITEMS = sizeof(items) / sizeof(items[0]);
   int pos = 0, capture = -1;
   const char *msg = nullptr;
   bool isBreak = false, isE0 = false, redraw = true, joyChanged = false;
@@ -809,6 +837,8 @@ static void bootMenu() {
             }
           } else if (it == 2) {
             config.mode = (Pc88BasicMode)((config.mode + 1) % 4);
+          } else if (it == 3) {
+            config.cpu8MHz = !config.cpu8MHz;
           } else {
             bootMenuDraw(it, "LOADING...");
             for (int d = 0; d < NUM_DRIVES && !msg; d++)
@@ -841,6 +871,36 @@ static void swapDisk(int d) {
   showStatus("PAUSED  F12:RESUME  F10/F11:DISK  SHIFT+F10/F11:WRITE BACK  SHIFT+F12:RESET");
 }
 
+static uint8_t kbdKept[32];
+static int kbdKeptHead = 0, kbdKeptCount = 0;
+static bool kbdLedByte(uint8_t b) {
+  fabgl::PS2Controller::sendData(b, 0);
+  for (uint32_t t0 = millis(); millis() - t0 < 500; ) {
+    int r = fabgl::PS2Controller::getData(0, 10);
+    if (r == 0xFA) return true;
+    if (r >= 0 && r != 0xFE && kbdKeptCount < (int)sizeof(kbdKept)) kbdKept[(kbdKeptHead + kbdKeptCount++) % sizeof(kbdKept)] = (uint8_t)r;
+  }
+  return false;
+}
+static void kbdSetLeds(bool capsLock, bool scrollLock) {
+  fabgl::PS2Controller::lock(0, -1);
+  {
+    fabgl::PS2PortAutoDisableRX mouseOff(1);
+    if (kbdLedByte(0xED)) kbdLedByte((scrollLock ? 1 : 0) | (capsLock ? 4 : 0));
+  }
+  fabgl::PS2Controller::unlock(0);
+}
+static int kbdAvailable(fabgl::Keyboard *kb) { return kbdKeptCount + kb->scancodeAvailable(); }
+static int kbdNextScancode(fabgl::Keyboard *kb) {
+  if (kbdKeptCount > 0) {
+    uint8_t b = kbdKept[kbdKeptHead];
+    kbdKeptHead = (kbdKeptHead + 1) % (int)sizeof(kbdKept);
+    kbdKeptCount--;
+    return b;
+  }
+  return kb->getNextScancode(0);
+}
+
 static void updateKeyboard() {
   static bool isBreak = false, isE0 = false, isShift = false, f12Held = false, f10Held = false, f11Held = false;
   static bool resetArmed = false;
@@ -849,11 +909,11 @@ static void updateKeyboard() {
   {
     static uint8_t ledShown = 0xFF;
     const uint8_t led = (!(kbdKeys[0xA] & 0x80) ? 1 : 0) | (!(kbdKeys[0x8] & 0x20) ? 2 : 0);
-    if (led != ledShown) { ledShown = led; kb->setLEDs(false, (led & 1) != 0, (led & 2) != 0); }
+    if (led != ledShown) { ledShown = led; kbdSetLeds((led & 1) != 0, (led & 2) != 0); }
   }
-  int count = kb->scancodeAvailable();
+  int count = kbdAvailable(kb);
   while (count-- > 0) {
-    int sc = kb->getNextScancode(0);
+    int sc = kbdNextScancode(kb);
     if (sc == -1) break;
     if (sc == 0xF0) { isBreak = true; continue; }
     if (sc == 0xE0) { isE0 = true; continue; }
@@ -999,6 +1059,7 @@ static void vgaWaitVblank(int64_t frameStart) {
 void cpuTask(void *) {
   const int64_t frameUs = PC88_FRAME_REAL_US;
   int64_t next = esp_timer_get_time();
+  bool noWait = false, prevNoWait = false;
 #ifdef USE_SERIAL_DEBUG
   uint32_t sum = 0, mx = 0, over = 0, n = 0;
 #endif
@@ -1008,6 +1069,9 @@ void cpuTask(void *) {
       next = esp_timer_get_time();
       continue;
     }
+    updateJoystick(prevNoWait);
+    joyToKeys();
+    prevNoWait = noWait;
     next += frameUs;
     int64_t t0 = esp_timer_get_time();
 #ifdef USE_SERIAL_DEBUG
@@ -1016,18 +1080,16 @@ void cpuTask(void *) {
     for (int i = 0; i < PC88_LINES_PER_FRAME; i++) {
 #ifdef USE_SERIAL_DEBUG
       uint32_t c0 = ESP.getCycleCount();
-      ExecZ80(&cpu, CPU_CYCLES_PER_LINE);
+      ExecZ80(&cpu, cpuLineCycles);
       z80Clk += ESP.getCycleCount() - c0;
 #else
-      ExecZ80(&cpu, CPU_CYCLES_PER_LINE);
+      ExecZ80(&cpu, cpuLineCycles);
 #endif
       pc88Line(i);
       opnEmuClock += CPU_CYCLES_PER_LINE;
       if (i == PC88_DISPLAY_LINES) frameReady = true;
       if (pc88IrqPending() && (cpu.IFF & IFF_1)) IntZ80(&cpu, pc88IrqAck());
     }
-    updateJoystick();
-    joyToKeys();
     int64_t now = esp_timer_get_time();
 #ifdef USE_SERIAL_DEBUG
     static uint64_t zSum, rSum, dSum, lSum;
@@ -1037,13 +1099,15 @@ void cpuTask(void *) {
     uint32_t us = (uint32_t)(now - t0);
     sum += us; if (us > mx) mx = us; if (us > frameUs) over++;
     if (++n == 300) {
-      Serial.printf("FRAME us: avg=%u max=%u over=%u/300 (budget=%d)  z80=%u render=%u disk=%u us/frame  lines=%u/200\n", sum / n, mx, over, (int)frameUs,
-                    (unsigned)(zSum / 240 / n), (unsigned)(rSum / 240 / n), (unsigned)(dSum / 240 / n), (unsigned)(lSum / n));
+      Serial.printf("FRAME us: avg=%u max=%u over=%u/300 (budget=%d)  z80=%u render=%u disk=%u us/frame  lines=%u/200  cpu=%dMHz\n", sum / n, mx, over, (int)frameUs,
+                    (unsigned)(zSum / 240 / n), (unsigned)(rSum / 240 / n), (unsigned)(dSum / 240 / n), (unsigned)(lSum / n),
+                    cpuLineCycles != CPU_CYCLES_PER_LINE ? 8 : 4);
       sum = mx = over = n = 0;
       zSum = rSum = dSum = lSum = 0;
     }
 #endif
     int64_t wait = next - now;
+    noWait = wait <= 0;
 #if PC88_VGA_SYNC
     if (vgaDesc) {
       if (wait > 0) vgaWaitVblank(next - frameUs);
@@ -1064,8 +1128,22 @@ void cpuTask(void *) {
     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL), \
     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL))
 
+#ifndef BOARD_HAS_PSRAM
+bool psramEnable() {
+  if (esp_spiram_init() != ESP_OK) return false;
+  esp_spiram_init_cache();
+  if (!esp_spiram_test()) return false;
+  if (esp_spiram_add_to_heapalloc() != ESP_OK) return false;
+  heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
+  return true;
+}
+#endif
+
 void setup() {
   Serial.begin(115200);
+#ifndef BOARD_HAS_PSRAM
+  Serial.printf("PSRAM: %s\n", psramEnable() ? "enabled by the sketch" : "init FAILED");
+#endif
   setCpuFrequencyMhz(240);
   disableCore0WDT();
   disableCore1WDT();
@@ -1114,6 +1192,16 @@ void setup() {
   canvas = new fabgl::Canvas(&DisplayController);
   canvas->setBrushColor(fabgl::Color::Black);
   canvas->clear();
+  if (psramFixMissing()) {
+    Serial.printf("ESP32 revision %d needs the PSRAM errata fix: set Tools > PSRAM to \"Enabled\" and build again\n", ESP.getChipRevision());
+    char msg[48];
+    snprintf(msg, sizeof(msg), "ESP32 REV.%d NEEDS THE PSRAM BUG FIX", ESP.getChipRevision());
+    canvas->selectFont(&fabgl::FONT_8x8);
+    canvas->setPenColor(fabgl::Color::Red);
+    canvas->drawText(8, 8, msg);
+    canvas->drawText(8, 24, "ARDUINO IDE: TOOLS > PSRAM > \"Enabled\", THEN BUILD AGAIN");
+    while (1) delay(1000);
+  }
 
   opnGen.begin(16384);
   soundGenerator.attach(&opnGen);
@@ -1155,10 +1243,11 @@ void setup() {
 #endif
 
   pc88Init(mem, config);
+  cpuLineCycles = config.cpu8MHz ? PC88_CYCLES_8MHZ : CPU_CYCLES_PER_LINE;
   memset(&cpu, 0, sizeof(cpu));
   ResetZ80(&cpu);
-  cpu.IPeriod = CPU_CYCLES_PER_LINE;
-  Serial.println("PC-8801 Booting...");
+  cpu.IPeriod = cpuLineCycles;
+  Serial.printf("PC-8801 Booting... (CPU %dMHz)\n", config.cpu8MHz ? 8 : 4);
   HEAPLOG("end setup");
   xTaskCreatePinnedToCore(cpuTask, "cpuTask", 8192, NULL, 24, NULL, 0);
 }

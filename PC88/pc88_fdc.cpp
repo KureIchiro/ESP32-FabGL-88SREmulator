@@ -87,6 +87,8 @@ static uint8_t *dataPtr;
 static uint32_t dataLen, dataAvail, dataPos;
 static uint32_t curHdr;
 static int      waitUs;
+static const int OVERRUN_US = 500;
+static int      xferIdleUs;
 static bool     endAfterSector;
 static bool     xferWrite;
 static uint8_t  fmtBuf[4 * 64];
@@ -198,6 +200,7 @@ static void startSector() {
   dataAvail = rd16le(&sh[SH_SIZE]);
   dataLen = N ? (128u << (N > 7 ? 7 : N)) : (DTL ? DTL : 128);
   dataPos = 0;
+  xferIdleUs = 0;
 }
 
 static void sectorDone() {
@@ -376,6 +379,7 @@ uint8_t upd765ReadData() {
   }
   if (phase == PH_READ) {
     uint8_t v = (dataPos < dataAvail) ? dataPtr[dataPos] : 0x4E;
+    xferIdleUs = 0;
     if (++dataPos >= dataLen) sectorDone();
     return v;
   }
@@ -391,6 +395,7 @@ void upd765WriteData(uint8_t v) {
       return;
     case PH_WRITE:
       if (dataPos < dataAvail) dataPtr[dataPos] = v;
+      xferIdleUs = 0;
       if (++dataPos >= dataLen) sectorDone();
       return;
     case PH_FORMAT:
@@ -422,6 +427,12 @@ void upd765Tick(int us) {
   if (phase == PH_SECTOR_END) {
     waitUs -= us;
     if (waitUs <= 0) nextSector(xferWrite);
+  } else if (nonDma && (phase == PH_READ || phase == PH_WRITE)) {
+    xferIdleUs += us;
+    if (xferIdleUs >= OVERRUN_US) {
+      if (phase == PH_WRITE && dataPos) { Pc88Drive *d = curDrive(); if (d) d->dirty = true; }
+      abnormal(0x10, 0);
+    }
   }
 }
 

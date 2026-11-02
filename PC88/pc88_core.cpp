@@ -200,6 +200,7 @@ extern "C" uint8_t PC88_FAST pc88In(uint16_t port) {
     case 0x5C: return (uint8_t)(0xF8 | (s.vramSel < 3 ? 1 << s.vramSel : 0));
     case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67: case 0x68:
       return pc88DmacRead(p);
+    case 0x6E: return s.cfg.cpu8MHz ? 0x7F : 0xFF;
     case 0x70: return s.p70;
     case 0x71: return s.p71;
     case 0xE8: return s.mem.kanji1 ? s.mem.kanji1[(uint32_t)s.kanjiAddr * 2 + 1] : 0xFF;

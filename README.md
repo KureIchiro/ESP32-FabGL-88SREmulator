@@ -42,7 +42,7 @@ The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own l
 - **Board Manager**: ESP32 by Espressif Systems (**v2.0.5 Recommended**)
 - **Library**: FabGL v1.0.9
 - **Board**: `ESP32 Dev Module` (TTGO VGA32)
-- **PSRAM**: `"Enabled"` (**Required**)
+- **PSRAM**: `"Enabled"` (required). Older ESP32 chips (revision 0–2, found on many TTGO VGA32 boards) have a PSRAM bug (Espressif errata CPU-3.9), and `"Enabled"` makes the compiler add a workaround for it. On chip revision 3 or later you may choose `"Disabled"` instead: the sketch turns PSRAM on by itself and runs about 30% faster without the workaround. On an older chip a `"Disabled"` build stops at startup with a message, because it could occasionally corrupt memory. The upload log shows the revision (e.g. "Chip is ESP32-D0WDQ6 (revision 1)").
 - **Display rate** (`#define PC88_VGA_HZ` near the top of `PC88.ino`):
   - `55` (default): 55.4 Hz, same speed as the real machine.
   - `56`: 56.0 Hz, for monitors that do not accept 55.4 Hz. Software runs about 1% faster.
@@ -73,6 +73,7 @@ The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own l
 | :--- | :--- |
 | Disk1 / Disk2 | Choose a D88 for each drive. For a file containing several disks, choose which one. If Disk1 is such a file and Disk2 is empty, the next disk goes to Disk2 automatically. The selector opens in the folder of the most recently chosen disk. |
 | Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
+| Clock | Main CPU 4MHz / 8MHz (the clock switch of the PC-8801FH and later; software reads it at port 6Eh). 8MHz runs about 1.6× faster than 4MHz, like the real machine with its memory wait. Shown only when the sketch is built without the PSRAM workaround (`"Disabled"` on chip revision 3 or later); the workaround build is too slow for 8MHz. |
 | Joy B1〜B3 | Key pressed by joystick buttons 1–3 (Enter → press the key; F6–F12 cancel). Default SPACE / RETURN / ESC. |
 | Run | Start |
 
@@ -143,7 +144,7 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
 - **ボードマネージャ**: ESP32 by Espressif Systems（**v2.0.5 推奨**）
 - **ライブラリ**: FabGL v1.0.9
 - **ボード**: `ESP32 Dev Module`（TTGO VGA32）
-- **PSRAM**: `"Enabled"`（**必須**）
+- **PSRAM**: `"Enabled"`（必須）。古い ESP32（リビジョン 0〜2。TTGO VGA32 にも多い）には PSRAM の不具合（Espressif errata CPU-3.9）があり、`"Enabled"` にするとコンパイラがその回避策を入れます。チップがリビジョン 3 以降なら `"Disabled"` でもよく、スケッチが起動時に PSRAM を有効にし、回避策が入らないぶん約 3 割速くなります。古いチップで `"Disabled"` にしたものは、まれにメモリが壊れるため、起動時に理由を表示して止まります。リビジョンは書き込みのときのログ（「Chip is ESP32-D0WDQ6 (revision 1)」など）で分かります。
 - **画面の周波数**（`PC88.ino` の先頭近くの `#define PC88_VGA_HZ`）:
   - `55`（既定）: 55.4Hz。実機と同じ速さです。
   - `56`: 56.0Hz。55.4Hz が映らないモニタ用です。ソフトが約 1% 速くなります。
@@ -174,6 +175,7 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
 | :--- | :--- |
 | Disk1 / Disk2 | 各ドライブの D88 を選ぶ。複数枚入ったファイルは何枚目かを選ぶ。Disk1 に複数枚入ったファイルを選び Disk2 が空なら、次の 1 枚を自動で Disk2 に入れる。選択画面は、最後に選んだディスクのフォルダから開く。 |
 | Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
+| Clock | 本体の CPU を 4MHz / 8MHz にする（PC-8801FH 以降のクロックの切り替えスイッチ。ソフトはポート 6Eh で読む）。8MHz は実機と同じくメモリウェイトの分を差し引いて 4MHz の約 1.6 倍。PSRAM の回避策なしで組み立てたとき（リビジョン 3 以降のチップで `"Disabled"`）だけ出ます（回避策ありでは 8MHz に追いつかないため）。 |
 | Joy B1〜B3 | ジョイスティックのボタン 1〜3 で押すキー（Enter のあと割り当てるキーを押す。F6〜F12 で取り消し）。既定は SPACE / RETURN / ESC。 |
 | Run | 起動 |
 

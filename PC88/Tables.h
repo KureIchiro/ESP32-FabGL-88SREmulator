@@ -20,7 +20,6 @@
 #define Z80_TABLE_ATTR DRAM_ATTR
 #endif
 
-/* No M1 waits. */
 static const byte Z80_TABLE_ATTR Cycles[256] =
 {
    4,10, 7, 6, 4, 4, 7, 4, 4,11, 7, 6, 4, 4, 7, 4,
