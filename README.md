@@ -87,7 +87,23 @@ The boot menu and the disk selectors can also be operated with the 1P controller
 - **`[Shift] + [F12]`** : Reset (reboots the ESP32 and returns to the boot menu). If a disk has been written and not saved to SD, the first press only pauses with a warning; press again to reset.
 - **While paused `[F10]` / `[F11]`** : Change the disk in drive 1 / 2
 - **While paused `[Shift] + [F10]` / `[Shift] + [F11]`** : Write drive 1 / 2 back to the SD card
-- Special keys (Japanese 106 keyboard): STOP = End, HELP = ScrollLock, GRPH = left Alt, KANA = Katakana/Hiragana or right Alt, ROLL UP/DOWN = PageUp/PageDown, INS/DEL = BackSpace / Delete. KANA and CAPS are lock keys.
+
+### Keys that work differently from their keytop (Japanese 106 keyboard)
+
+| PC keyboard | PC-8801 |
+| :--- | :--- |
+| End | STOP |
+| ScrollLock | HELP |
+| Left Alt | GRPH |
+| Katakana/Hiragana / right Alt | KANA (lock key; the Scroll Lock LED shows it) |
+| CapsLock | CAPS (lock key; the Caps Lock LED shows it) |
+| PageUp / PageDown | ROLL UP / ROLL DOWN |
+| BackSpace / Delete | INS/DEL (with Shift: INS) |
+| Home | HOME (with Shift: CLR) |
+| Ro (`\`) | `_` |
+| F6–F12 | Not sent to the PC-8801 (its F6–F10 are Shift + F1–F5, as on the real machine). F10–F12 are emulator operations (above); F6–F9 do nothing. |
+
+Not available: COPY and the numeric keypad `=` and `,`. Insert, Muhenkan, Henkan and Hankaku/Zenkaku do nothing.
 
 ---
 
@@ -189,7 +205,23 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
 - **`[Shift] + [F12]`** : リセット（ESP32 ごと再起動して起動メニューへ）。SD に書き戻していないディスクの書き込みがあるときは、1 回目は警告を出して一時停止するだけです。もう一度押すとリセットします。
 - **一時停止中に `[F10]` / `[F11]`** : ドライブ 1 / 2 のディスクを入れ替え
 - **一時停止中に `[Shift] + [F10]` / `[Shift] + [F11]`** : ドライブ 1 / 2 の内容を SD へ書き戻し
-- 特殊キー（日本語 106 キーボード）: STOP = End、HELP = ScrollLock、GRPH = 左 Alt、カナ = カタカナ/ひらがな または右 Alt、ROLL UP/DOWN = PageUp/PageDown、INS/DEL = BackSpace / Delete。カナと CAPS はロック式です。
+
+### 印字と機能が違うキー（日本語 106 キーボード）
+
+| PC のキーボード | PC-8801 |
+| :--- | :--- |
+| End | STOP |
+| ScrollLock | HELP |
+| 左 Alt | GRPH |
+| カタカナひらがな・右 Alt | カナ（ロック式。Scroll Lock のランプが連動） |
+| CapsLock | CAPS（ロック式。Caps Lock のランプが連動） |
+| PageUp / PageDown | ROLL UP / ROLL DOWN |
+| BackSpace / Delete | INS/DEL（Shift で INS） |
+| Home | HOME（Shift で CLR） |
+| ろ（`\`） | `_` |
+| F6〜F12 | PC-8801 には送りません（PC-8801 の F6〜F10 は実機と同じく Shift + F1〜F5）。F10〜F12 はエミュレータの操作（上の一覧）、F6〜F9 は何もしません。 |
+
+COPY とテンキーの `=`・`,` はありません。Insert・無変換・変換・半角/全角 は何もしません。
 
 ---
 

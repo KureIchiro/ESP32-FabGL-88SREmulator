@@ -48,7 +48,7 @@
 #include "pc88.h"
 #include "ym2203.h"
 
-//#define USE_SERIAL_DEBUG
+#define USE_SERIAL_DEBUG
 
 #define SD_SCLK 14
 #define SD_MISO 2
@@ -901,6 +901,21 @@ static int kbdNextScancode(fabgl::Keyboard *kb) {
   return kb->getNextScancode(0);
 }
 
+static uint8_t hostDown[64];
+static void hostKeySet(uint8_t ps2, bool ext, bool down) {
+  const int h = (ext ? 256 : 0) | ps2;
+  if (down) hostDown[h >> 3] |= (uint8_t)(1 << (h & 7));
+  else      hostDown[h >> 3] &= (uint8_t)~(1 << (h & 7));
+}
+static bool hostKeyAny(uint8_t row, uint8_t bit) {
+  for (int i = 0; i < pc88KeyMapCount; i++) {
+    const Pc88KeyMap &e = pc88KeyMapTable[i];
+    const int h = (e.ext ? 256 : 0) | e.ps2;
+    if (e.row == row && e.bit == bit && ((hostDown[h >> 3] >> (h & 7)) & 1)) return true;
+  }
+  return false;
+}
+
 static void updateKeyboard() {
   static bool isBreak = false, isE0 = false, isShift = false, f12Held = false, f10Held = false, f11Held = false;
   static bool resetArmed = false;
@@ -954,6 +969,7 @@ static void updateKeyboard() {
               uint8_t keep = (r == 0x8) ? 0x20 : (r == 0xA) ? 0x80 : 0x00;
               kbdKeys[r] = (uint8_t)(kbdKeys[r] | ~keep);
             }
+            memset(hostDown, 0, sizeof(hostDown));
           }
         }
       } else if (isBreak) held = false;
@@ -970,8 +986,11 @@ static void updateKeyboard() {
           if (!isBreak && !h) { kbdKeys[row] ^= m; h = true; }
           else if (isBreak) h = false;
         }
-        else if (isBreak) kbdKeys[row] |= m;
-        else kbdKeys[row] &= (uint8_t)~m;
+        else {
+          hostKeySet(sc, isE0, !isBreak);
+          if (!isBreak) kbdKeys[row] &= (uint8_t)~m;
+          else if (!hostKeyAny(row, pc88KeyMapTable[i].bit)) kbdKeys[row] |= m;
+        }
       }
     }
     isBreak = isE0 = false;
