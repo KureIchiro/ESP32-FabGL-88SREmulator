@@ -122,6 +122,95 @@ static bool levelEnabled(int l) {
 }
 static void request(int l) { if (levelEnabled(l)) pc88.irqReq |= (uint8_t)(1 << l); }
 
+static inline uint8_t opnFlags(const Pc88State &s) {
+  return (uint8_t)(((s.opnTimer.status & 3) | s.opnStatus) & s.opnStMask);
+}
+static inline bool opnIrq(const Pc88State &s) {
+#if PC88_OPNA
+  return (opnFlags(s) & s.opnReg29 & 0x1F) != 0;
+#else
+  return ym2203TimerIrq(s.opnTimer);
+#endif
+}
+static void opnIrqUpdate(Pc88State &s) {
+  if (opnIrq(s)) request(4); else s.irqReq &= (uint8_t)~0x10;
+}
+
+#if PC88_OPNA
+static void opnSetStatus(Pc88State &s, uint8_t bits) {
+  if (!(s.opnStatus & bits)) { s.opnStatus |= (uint8_t)(bits & s.opnStMask); opnIrqUpdate(s); }
+}
+static void adpcmStepAddr(Pc88State &s, bool write) {
+  auto &a = s.adpcm;
+  a.memaddr += 1u << a.gran;
+  if (a.memaddr == a.stop) { opnSetStatus(s, 0x04); s.opnStatusNext = 0x04; a.memaddr &= 0x3FFFFF; }
+  if (a.memaddr == a.limit) a.memaddr = 0;
+  if (write || a.memaddr < a.stop) opnSetStatus(s, 0x08);
+}
+static uint8_t adpcmReadRam(Pc88State &s) {
+  auto &a = s.adpcm;
+  uint8_t v = s.mem.adpcmRam ? s.mem.adpcmRam[(a.memaddr >> a.gran) & (PC88_ADPCM_RAM_SIZE - 1)] : 0xFF;
+  adpcmStepAddr(s, false);
+  return v;
+}
+static int64_t adpcmLength(const Pc88State &s) {
+  const auto &a = s.adpcm;
+  uint32_t span = a.stop > a.start ? a.stop - a.start : (a.limit - a.start) + a.stop;
+  return (int64_t)((span >> a.gran) * 2) * 72 * 65536;
+}
+static void adpcmWrite(Pc88State &s, uint8_t r, uint8_t v) {
+  auto &a = s.adpcm;
+  a.reg[r & 15] = v;
+  switch (r) {
+    case 0x00:
+      if ((v & 0x80) && !a.play) {
+        a.play = true;
+        a.memaddr = a.start;
+        a.remain = adpcmLength(s);
+      }
+      if (v & 1) a.play = false;
+      a.ctl1 = v;
+      break;
+    case 0x01: a.ctl2 = v; a.gran = (v & 2) ? 1 : 4; break;
+    case 0x02: case 0x03: a.start = (uint32_t)(a.reg[3] * 256 + a.reg[2]) << 6; a.memaddr = a.start; break;
+    case 0x04: case 0x05: a.stop = (uint32_t)(a.reg[5] * 256 + a.reg[4] + 1) << 6; break;
+    case 0x08:
+      if ((a.ctl1 & 0x60) == 0x60) {
+        if (s.mem.adpcmRam) s.mem.adpcmRam[(a.memaddr >> a.gran) & (PC88_ADPCM_RAM_SIZE - 1)] = v;
+        adpcmStepAddr(s, true);
+      }
+      break;
+    case 0x09: case 0x0A: { uint16_t d = (uint16_t)(a.reg[10] * 256 + a.reg[9]); a.deltaN = d < 256 ? 256 : d; break; }
+    case 0x0C: case 0x0D: a.limit = (uint32_t)(a.reg[13] * 256 + a.reg[12] + 1) << 6; break;
+    case 0x10:
+      if (v & 0x80) s.opnStatus = 0;
+      else s.opnStMask = (uint8_t)~(v & 0x1F);
+      opnIrqUpdate(s);
+      break;
+    default: break;
+  }
+}
+static inline void adpcmLine(Pc88State &s) {
+  auto &a = s.adpcm;
+  if (!a.play) return;
+  a.remain -= (int64_t)a.deltaN * PC88_CYCLES_PER_LINE;
+  if (a.remain > 0) return;
+  if (a.ctl1 & 0x10) { a.remain += adpcmLength(s); if (a.remain <= 0) a.remain = 1; a.memaddr = a.start; }
+  else { a.play = false; a.memaddr = a.stop & 0x3FFFFF; if (a.memaddr == a.limit) a.memaddr = 0; }
+  opnSetStatus(s, 0x04);
+}
+static void opnaReset(Pc88State &s) {
+  s.opnAddrHi = 0;
+  s.opnReg29 = 0x1F;
+  s.opnStMask = (uint8_t)~0x1C;
+  s.opnStatus = s.opnStatusNext = 0;
+  memset(&s.adpcm, 0, sizeof(s.adpcm));
+  for (int r = 0; r <= 0x10; r++) if (r != 0x07 && r != 0x0E && r != 0x0F) adpcmWrite(s, (uint8_t)r, 0);
+  s.opnStMask = (uint8_t)~0x1C;
+  s.opnStatus = 0;
+}
+#endif
+
 bool pc88IrqPending() {
   if (!pc88.canInt || !pc88.irqReq) return false;
   for (int l = 0; l < pc88.levelLimit; l++) if (pc88.irqReq & (1 << l)) return true;
@@ -194,8 +283,31 @@ extern "C" uint8_t PC88_FAST pc88In(uint16_t port) {
     case 0x31: return s.dip31;
     case 0x32: return s.p32;
     case 0x40: return (uint8_t)(0xC0 | (s.vrtc ? 0x20 : 0) | (cal.cdo ? 0x10 : 0) | (s.cfg.diskBoot && s.mem.diskrom ? 0 : 0x08) | 0x04);
+#if PC88_OPNA
+    case 0x44: return (uint8_t)(opnFlags(s) & 3);
+#else
     case 0x44: return (uint8_t)(s.opnTimer.status & 3);
-    case 0x45: return s.opnAddr < 14 ? s.ssgShadow[s.opnAddr] : s.opnAddr < 0x10 ? pc88SsgRead(s.opnAddr) : 0x00;
+#endif
+    case 0x45:
+#if PC88_OPNA
+      if (s.opnAddr == 0xFF) return 0x01;
+#endif
+      return s.opnAddr < 14 ? s.ssgShadow[s.opnAddr] : s.opnAddr < 0x10 ? pc88SsgRead(s.opnAddr) : 0x00;
+#if PC88_OPNA
+    case 0x46: {
+      uint8_t r = (uint8_t)((((s.opnTimer.status & 3) | s.opnStatus | 0x08) & s.opnStMask) | (s.adpcm.play ? 0x20 : 0));
+      if (s.opnStatusNext) { s.opnStatus |= (uint8_t)(s.opnStatusNext & s.opnStMask); s.opnStatusNext = 0; opnIrqUpdate(s); }
+      return r;
+    }
+    case 0x47:
+      if (s.opnAddrHi == 0x08) {
+        uint8_t r = s.adpcm.rdBuf[0];
+        s.adpcm.rdBuf[0] = s.adpcm.rdBuf[1];
+        if ((s.adpcm.ctl1 & 0x60) == 0x20) s.adpcm.rdBuf[1] = adpcmReadRam(s);
+        return r;
+      }
+      return 0x00;
+#endif
     case 0x50: case 0x51: return pc88CrtcRead(p);
     case 0x5C: return (uint8_t)(0xF8 | (s.vramSel < 3 ? 1 << s.vramSel : 0));
     case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67: case 0x68:
@@ -223,7 +335,7 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
       uint8_t old = s.p32;
       s.p32 = v;
       if ((old ^ v) & 0x20) s.palDirty = true;
-      if ((old & 0x80) && !(v & 0x80) && ym2203TimerIrq(s.opnTimer)) request(4);
+      if ((old & 0x80) && !(v & 0x80) && opnIrq(s)) request(4);
       updateMap();
       break;
     }
@@ -237,13 +349,29 @@ extern "C" void PC88_FAST pc88Out(uint16_t port, uint8_t v) {
       if ((old ^ v) & 0xA0) pc88Speaker(v);
       break;
     }
-    case 0x44: s.opnAddr = v; break;
+    case 0x44:
+      s.opnAddr = v;
+      if (v >= 0x2D && v <= 0x2F) { ym2203TimerWrite(s.opnTimer, v, 0); pc88OpnWrite(v, 0); }
+      break;
     case 0x45:
       if (s.opnAddr < 0x10) s.ssgShadow[s.opnAddr] = v;
       ym2203TimerWrite(s.opnTimer, s.opnAddr, v);
-      if (s.opnAddr == 0x27 && !ym2203TimerIrq(s.opnTimer)) s.irqReq &= (uint8_t)~0x10;
+      if (s.opnAddr == 0x27 && !opnIrq(s)) s.irqReq &= (uint8_t)~0x10;
+#if PC88_OPNA
+      if (s.opnAddr == 0x29) { s.opnReg29 = v; opnIrqUpdate(s); }
+#else
+      if (s.opnAddr == 0x22 || s.opnAddr == 0x29 || (s.opnAddr >= 0x10 && s.opnAddr <= 0x1F) ||
+          (s.opnAddr >= 0xB4 && s.opnAddr <= 0xB6)) break;
+#endif
       pc88OpnWrite(s.opnAddr, v);
       break;
+#if PC88_OPNA
+    case 0x46: s.opnAddrHi = v; break;
+    case 0x47:
+      if (s.opnAddrHi <= 0x10) adpcmWrite(s, s.opnAddrHi, v);
+      if (s.opnAddrHi != 0x08) pc88OpnWrite((uint16_t)(0x100 | s.opnAddrHi), v);
+      break;
+#endif
     case 0x50: case 0x51: pc88CrtcWrite(p, v); break;
     case 0x52: s.p52 = v; s.bg[0] = (v & 0x10) ? 7 : 0; s.bg[1] = (v & 0x40) ? 7 : 0; s.bg[2] = (v & 0x20) ? 7 : 0; s.palDirty = true; break;
     case 0x53: s.p53 = v; break;
@@ -296,7 +424,10 @@ void PC88_FAST pc88Line(int line) {
   s.rtcAcc += PC88_CYCLES_PER_LINE;
   while (s.rtcAcc >= 6656) { s.rtcAcc -= 6656; request(2); }
   ym2203TimerAdvance(s.opnTimer, 1290);
-  if (ym2203TimerIrq(s.opnTimer)) request(4);
+#if PC88_OPNA
+  adpcmLine(s);
+#endif
+  if (opnIrq(s)) request(4);
   uint32_t t2 = profClock();
   pc88DiskLine();
   pc88ProfDisk += profClock() - t2;
@@ -334,6 +465,19 @@ void pc88Reset() {
   s.opnAddr = 0;
   memset(s.ssgShadow, 0, sizeof(s.ssgShadow));
   ym2203TimerReset(s.opnTimer, PC88_CPU_CLOCK);
+  pc88OpnWrite(0x2D, 0);
+#if PC88_OPNA
+  opnaReset(s);
+  pc88OpnWrite(0x29, 0x1F);
+  pc88OpnWrite(0x22, 0x00);
+  for (int c = 0; c < 3; c++) { pc88OpnWrite((uint16_t)(0xB4 + c), 0xC0); pc88OpnWrite((uint16_t)(0x1B4 + c), 0xC0); }
+  pc88OpnWrite(0x101, 0x00);
+  pc88OpnWrite(0x100, 0x01);
+  for (int r = 0; r <= 0x0D; r++) if (r != 0x01 && r != 0x07 && r != 0x08) pc88OpnWrite((uint16_t)(0x100 + r), 0x00);
+  pc88OpnWrite(0x10, 0xBF);
+  pc88OpnWrite(0x11, 0x00);
+  for (int i = 0; i < 6; i++) pc88OpnWrite((uint16_t)(0x18 + i), 0x00);
+#endif
   memset(&cal, 0, sizeof(cal));
   for (int i = 0; i < 16; i++) pc88_key[i] = 0xFF;
   updateMap();

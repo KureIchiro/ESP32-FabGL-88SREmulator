@@ -29,6 +29,12 @@
 #include <stdlib.h>
 #include <SPI.h>
 #include <SD.h>
+#if __has_include("emu_switch.h")
+#include "emu_switch.h"
+#define EMU_SWITCH 1
+#else
+#define EMU_SWITCH 0
+#endif
 #include <fabgl.h>
 #include <vector>
 #include <algorithm>
@@ -48,13 +54,25 @@
 #include "pc88.h"
 #include "ym2203.h"
 
-#define USE_SERIAL_DEBUG
+//#define USE_SERIAL_DEBUG
 
+// TTGO VGA32
 #define SD_SCLK 14
 #define SD_MISO 2
-//#define SD_MISO 35  // ORANGE ESPer
 #define SD_MOSI 12
-#define SD_CS 13
+#define SD_CS   13
+
+// ORANGE ESPer
+// #define SD_SCLK 14
+// #define SD_MISO 35
+// #define SD_MOSI 12
+// #define SD_CS   13
+
+// Switch Science FabGL 
+// #define SD_SCLK 14
+// #define SD_MISO 35
+// #define SD_MOSI 2
+// #define SD_CS   13
 
 #define CPU_CYCLES_PER_LINE PC88_CYCLES_PER_LINE
 #if !defined(BOARD_HAS_PSRAM) || defined(EMU_PSRAM_NO_ERRATA_FIX)
@@ -219,20 +237,24 @@ static volatile int opnQHead = 0, opnQTail = 0;
 
 static volatile uint32_t opnEmuClock = 0;
 
-static const uint8_t SPK_REG = 0xFF;
-static void soundQueuePush(uint8_t reg, uint8_t val) {
+static const uint16_t SPK_REG = 0x0FF;
+static void soundQueuePush(uint16_t reg, uint8_t val) {
   int next = (opnQHead + 1) % OPN_QUEUE;
   if (next == opnQTail || !opnQueue) return;
   uint32_t t = opnEmuClock + (uint32_t)pc88LineCycle();
-  opnQueue[opnQHead] = ((t >> 5) << 16) | ((uint32_t)reg << 8) | val;
+  opnQueue[opnQHead] = (((t >> 5) & 0x7FFF) << 17) | ((uint32_t)(reg & 0x1FF) << 8) | val;
   opnQHead = next;
 }
-void pc88OpnWrite(uint8_t reg, uint8_t val) { soundQueuePush(reg, val); }
+static inline int32_t queueTimeDiff(uint32_t e, uint32_t clk) {
+  return (int32_t)(((e >> 17) - (clk >> 5)) << 17) >> 17;
+}
+void pc88OpnWrite(uint16_t reg, uint8_t val) { if (reg != SPK_REG) soundQueuePush(reg, val); }
 void pc88Speaker(uint8_t bits) { soundQueuePush(SPK_REG, bits & 0xA0); }
 
 class OpnGenerator : public fabgl::WaveformGenerator {
   Ym2203Fm *fm = nullptr;
-  const uint32_t psgClock = PC88_CPU_CLOCK / 2 / 16;
+  uint32_t psgClock = PC88_CPU_CLOCK / 2 / 16;
+  int sndRate = 16384;
   uint32_t tickAccum = 0, tickStep = 0;
   uint8_t  regs[16] = { 0 };
   uint32_t tonePeriod[3] = { 1, 1, 1 }, noisePeriod = 1, envPeriod = 1;
@@ -265,6 +287,7 @@ class OpnGenerator : public fabgl::WaveformGenerator {
   volatile int head = 0, tail = 0;
   int16_t  lastSample = 0;
   int32_t  fmBuf[64];
+  int32_t  rhyBuf[64];
 
   void ssgWrite(uint8_t reg, uint8_t val) {
     reg &= 15;
@@ -336,8 +359,39 @@ public:
     fm = ym2203Create(PC88_CPU_CLOCK, rate);
     setSampleRate(rate);
   }
+  int loadRhythm() {
+#if PC88_OPNA
+    static const char *nm[6] = { "BD", "SD", "TOP", "HH", "TOM", "RIM" };
+    int ok = 0;
+    for (int i = 0; i < 6; i++) {
+      File f = SD.open(String("/PC88/2608_") + nm[i] + ".WAV");
+      if (!f && i == 5) f = SD.open("/PC88/2608_RYM.WAV");
+      if (!f) continue;
+      const size_t len = f.size();
+      uint8_t *w = (uint8_t *)ps_malloc(len);
+      if (w && f.read(w, len) == len) {
+        const int n = ym2203RhythmFromWav(w, len, sndRate, nullptr, 0);
+        int16_t *d = n > 0 ? (int16_t *)ps_malloc(sizeof(int16_t) * n) : nullptr;
+        if (d && ym2203RhythmFromWav(w, len, sndRate, d, n) == n) { ym2203SetRhythm(fm, i, d, n); ok++; }
+        else if (d) free(d);
+      }
+      if (w) free(w);
+      f.close();
+    }
+    return ok;
+#else
+    return 0;
+#endif
+  }
+  void setSsgDivider(uint8_t reg) {
+    static const uint8_t div[3] = { 4, 2, 1 };
+    psgClock = PC88_CPU_CLOCK / 8 / div[reg - 0x2D];
+    tickStep = (uint32_t)(((uint64_t)psgClock << 16) / sndRate);
+  }
+  void setAdpcmRam(const uint8_t *ram) { if (fm) ym2203SetAdpcmRam(fm, ram); }
   void setSampleRate(int rate) {
     this->fabgl::WaveformGenerator::setSampleRate(rate);
+    sndRate = rate > 0 ? rate : 16384;
     tickStep = (uint32_t)(((uint64_t)psgClock << 16) / (rate > 0 ? rate : 16384));
     clkPerSampleQ16 = (uint32_t)((((uint64_t)PC88_CYCLES_PER_LINE * PC88_LINES_PER_FRAME * 1000000u) << 16) /
                                  ((uint64_t)PC88_FRAME_REAL_US * (rate > 0 ? rate : 16384)));
@@ -348,9 +402,14 @@ public:
   void applyQueued(int32_t w = 256) {
     uint32_t e = opnQueue[opnQTail];
     opnQTail = (opnQTail + 1) % OPN_QUEUE;
-    uint8_t r = (e >> 8) & 0xFF, v = e & 0xFF;
+    uint16_t r = (e >> 8) & 0x1FF;
+    uint8_t v = e & 0xFF;
     if (r == SPK_REG) spkWrite(v, w);
-    else if (r < 0x10) ssgWrite(r, v); else ym2203WriteReg(fm, r, v);
+    else if (r < 0x10) ssgWrite((uint8_t)r, v);
+    else {
+      if (r >= 0x2D && r <= 0x2F) setSsgDivider((uint8_t)r);
+      ym2203WriteReg(fm, r, v);
+    }
   }
 
   uint32_t sndClock = 0, sndFrac = 0, clkPerSampleQ16 = 243u << 16;
@@ -373,10 +432,10 @@ public:
     while (space > 0) {
       int n = space > 64 ? 64 : space;
       while (opnQTail != opnQHead) {
-        uint32_t t16 = opnQueue[opnQTail] >> 16;
-        int32_t d = (int16_t)(t16 - (sndClock >> 5));
+        const uint32_t qe = opnQueue[opnQTail];
+        int32_t d = queueTimeDiff(qe, sndClock);
         if (d > 0) {
-          if ((int16_t)(t16 - (emu >> 5)) <= 0) {
+          if (queueTimeDiff(qe, emu) <= 0) {
             int m = (int)((((uint64_t)d << 21) + clkPerSampleQ16 - 1) / clkPerSampleQ16);
             if (m < n) n = m;
           }
@@ -386,14 +445,14 @@ public:
         applyQueued(w > 256 ? 256 : w);
       }
       advanceClock(n, emu);
-      ym2203Generate(fm, fmBuf, n);
+      ym2203Generate(fm, fmBuf, n, rhyBuf);
       for (int i = 0; i < n; i++) {
 #if FM_TREBLE_FIX
         fmLp += ((fmBuf[i] - fmLp) * FM_TREBLE_FIX) >> 8;
 #else
         fmLp = fmBuf[i];
 #endif
-        int32_t x = ((fmLp >> 7) + ((ssgSample() * 171) >> 8)) << 8;
+        int32_t x = (((fmLp + rhyBuf[i]) >> 7) + ((ssgSample() * 171) >> 8)) << 8;
         if (spk | singPend) {
           int32_t lv;
           if (singPend) { lv = singArea + ((spk & 0x80) ? singRem : 0); singPend = false; }
@@ -731,6 +790,9 @@ static const char *modeName[4] = { "N88-BASIC V2", "N88-BASIC V1 (S)", "N88-BASI
 
 static char menuShown[11][100];
 static bool menuValid = false;
+#if EMU_SWITCH
+static int emuNext = -1;
+#endif
 static void bootMenuInvalidate() { menuValid = false; }
 
 static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
@@ -762,6 +824,9 @@ static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
         if (i == capture) snprintf(line, sizeof(line), "Joy B%d: PRESS A KEY...", i - 3);
         else snprintf(line, sizeof(line), "Joy B%d: %s", i - 3, pc88KeyName(joyButtonKey[i - 4]));
         break;
+#if EMU_SWITCH
+      case 7: { char m[48]; emuNextLabel(emuNext, "PC88", m, sizeof(m)); snprintf(line, sizeof(line), "Next  : %s", m); break; }
+#endif
       case 8: snprintf(line, sizeof(line), "Run"); break;
       default: continue;
     }
@@ -792,15 +857,22 @@ static void bootMenuDraw(int cursor, const char *msg, int capture = -1) {
 
 static void bootMenu() {
   auto kb = PS2Controller.keyboard();
+  const int items[] = { 0, 1, 2,
 #if PC88_CLOCK_SWITCH
-  const int items[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
-#else
-  const int items[] = { 0, 1, 2, 4, 5, 6, 8 };
+                        3,
 #endif
+                        4, 5, 6,
+#if EMU_SWITCH
+                        7,
+#endif
+                        8 };
   const int NITEMS = sizeof(items) / sizeof(items[0]);
   int pos = 0, capture = -1;
   const char *msg = nullptr;
   bool isBreak = false, isE0 = false, redraw = true, joyChanged = false;
+#if EMU_SWITCH
+  emuNext = emuNextInit("PC88");
+#endif
   bootMenuInvalidate();
   for (;;) {
     if (redraw) { bootMenuDraw(items[pos], msg, capture); redraw = false; }
@@ -839,6 +911,10 @@ static void bootMenu() {
             config.mode = (Pc88BasicMode)((config.mode + 1) % 4);
           } else if (it == 3) {
             config.cpu8MHz = !config.cpu8MHz;
+#if EMU_SWITCH
+          } else if (it == 7) {
+            emuNext = emuNextCycle(emuNext, "PC88");
+#endif
           } else {
             bootMenuDraw(it, "LOADING...");
             for (int d = 0; d < NUM_DRIVES && !msg; d++)
@@ -1200,6 +1276,10 @@ void setup() {
   mem.tvram = (uint8_t *)heap_caps_malloc(0x1000, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
   if (!mem.tvram) mem.tvram = (uint8_t *)ps_malloc(0x1000);
   mem.subram = (uint8_t *)ps_malloc(0x4000);
+#if PC88_OPNA
+  mem.adpcmRam = (uint8_t *)ps_malloc(PC88_ADPCM_RAM_SIZE);
+  if (mem.adpcmRam) memset(mem.adpcmRam, 0, PC88_ADPCM_RAM_SIZE);
+#endif
   for (int d = 0; d < NUM_DRIVES; d++) {
     memset(&drives[d], 0, sizeof(drives[d]));
     drives[d].buffer = (uint8_t *)ps_malloc(PC88_D88_MAX);
@@ -1223,6 +1303,9 @@ void setup() {
   }
 
   opnGen.begin(16384);
+#if PC88_OPNA
+  opnGen.setAdpcmRam(mem.adpcmRam);
+#endif
   soundGenerator.attach(&opnGen);
   opnGen.enable(true);
   soundGenerator.setVolume(100);
@@ -1231,6 +1314,9 @@ void setup() {
   SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
   bool sdOK = SD.begin(SD_CS, SPI);
   if (sdOK) {
+#if EMU_SWITCH
+    emuSwitchCheck("PC88");
+#endif
     mem.n88rom = loadRom("/PC88/N88.ROM", 0x8000, false);
     static const char *ext[4] = { "/PC88/N88_0.ROM", "/PC88/N88_1.ROM", "/PC88/N88_2.ROM", "/PC88/N88_3.ROM" };
     for (int i = 0; i < 4; i++) mem.n88ext[i] = loadRom(ext[i], 0x2000, false);
@@ -1238,6 +1324,9 @@ void setup() {
     mem.diskrom = loadRom("/PC88/DISK.ROM", 0x2000, false);
     mem.kanji1 = loadRom("/PC88/KANJI1.ROM", 0x20000, false);
     mem.kanji2 = loadRom("/PC88/KANJI2.ROM", 0x20000, false);
+#if PC88_OPNA
+    Serial.printf("OPNA rhythm: %d/6 samples (/PC88/2608_*.WAV)\n", opnGen.loadRhythm());
+#endif
   }
   if (!sdOK || !mem.n88rom) {
     canvas->selectFont(&fabgl::FONT_8x8);

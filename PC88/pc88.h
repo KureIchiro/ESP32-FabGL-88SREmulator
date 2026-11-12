@@ -11,6 +11,11 @@
 #define PC88_FRAME_US        18061
 #define PC88_CYCLES_8MHZ     515
 
+#ifndef PC88_OPNA
+#define PC88_OPNA 1
+#endif
+#define PC88_ADPCM_RAM_SIZE  0x40000
+
 #ifdef ARDUINO
   #include <esp_attr.h>
   #define PC88_FAST IRAM_ATTR
@@ -33,6 +38,7 @@ struct Pc88Memory {
   uint8_t   *subram;
   Pc88Drive *drives;
   int        numDrives;
+  uint8_t   *adpcmRam;
 };
 
 enum Pc88BasicMode { PC88_V2, PC88_V1S, PC88_V1H, PC88_N };
@@ -66,7 +72,7 @@ extern uint8_t **pc88_rows;
 uint8_t pc88NativeColor(int r, int g, int b);
 void pc88VideoInvalidate();
 
-void    pc88OpnWrite(uint8_t reg, uint8_t val);
+void    pc88OpnWrite(uint16_t reg, uint8_t val);
 uint8_t pc88SsgRead(uint8_t reg);
 void    pc88Speaker(uint8_t bits);
 

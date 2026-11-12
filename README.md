@@ -7,7 +7,7 @@
 <a id="english"></a>
 # English
 
-An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Work in Progress). It supports VGA output, PS/2 keyboards, D88 disk images, the FDD sub-CPU, FM sound (YM2203) and a serial-connected external joystick.
+An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Work in Progress). It supports VGA output, PS/2 keyboards, D88 disk images, the FDD sub-CPU, FM sound (YM2608 / OPNA, as on the PC-8801FA/MA) and a serial-connected external joystick.
 
 ## 📝 Overview
 
@@ -15,9 +15,9 @@ An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Wor
   - This is the **vertical scanning frequency of the real PC-8801 with a 24 kHz (high-resolution) monitor** in 25-line mode (448 rasters per frame, 400 displayed). It is not a performance compromise.
   - The "about 60 Hz" often quoted for the PC-8801 is the 15 kHz (standard resolution) monitor (approx. 61–62 Hz). This emulator emulates the 24 kHz monitor only.
   - VGA output is 640x400 (each PC-8801 line is shown twice) at **55.4 Hz**, the same rate as the emulation, and each frame starts at the VGA vertical blank so the picture never tears. If your monitor does not accept 55.4 Hz, see `PC88_VGA_HZ` below.
-- **Emulated**: main Z80 (4 MHz) + FDD sub-CPU Z80, N88-BASIC V2 / V1(S) / V1(H) / N-BASIC, text (μPD3301 CRTC + μPD8257 DMA, attributes, semigraphics, skip line), 640x200 8-colour graphics with analog palette, ALU / independent plane access, YM2203 FM 3ch (with SSG-EG and CSM voice) + SSG 3ch, beeper and SING (1-bit speaker used by pre-SR music, e.g. Hydlide), μPD765 FDC with D88 images (multi-image files supported).
-- **Not emulated**: 15 kHz monitor mode, 640x400 monochrome (shown thinned to 200 lines), Sound Board II (OPNA), joystick port, CMT / RS-232C / mouse, memory wait.
-- **Audio**: 16384 Hz (FabGL default). FM and SSG are mixed into the 8-bit DAC.
+- **Emulated**: main Z80 (4 MHz) + FDD sub-CPU Z80, N88-BASIC V2 / V1(S) / V1(H) / N-BASIC, text (μPD3301 CRTC + μPD8257 DMA, attributes, semigraphics, skip line), 640x200 8-colour graphics with analog palette, ALU / independent plane access, YM2608 (OPNA) at ports 44h–47h as on the PC-8801FA/MA: FM 6ch (with LFO, SSG-EG and CSM voice) + SSG 3ch + rhythm (needs the 2608_*.WAV sample files) + ADPCM with 256KB RAM (software that only knows the YM2203 sounds the same as on the mkIISR), beeper and SING (1-bit speaker used by pre-SR music, e.g. Hydlide), μPD765 FDC with D88 images (multi-image files supported).
+- **Not emulated**: 15 kHz monitor mode, 640x400 monochrome (shown thinned to 200 lines), Sound Board II at A8h–ADh (the OPNA is at 44h–47h instead), stereo (the output is mono), joystick port, CMT / RS-232C / mouse, memory wait.
+- **Audio**: 16384 Hz (FabGL default). FM, SSG, rhythm and ADPCM are mixed into the 8-bit DAC.
 
 > ⚠️ **Notice Regarding Development & Licenses**
 >
@@ -30,7 +30,7 @@ An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Wor
 
 - **Graphics/Audio Engine**: Uses [FabGL](https://github.com/fdivitto/FabGL) by Fabrizio Di Vittorio.
 - **Z80 CPU Core**: Modified based on the work by Marat Fayzullin (used for both the main CPU and the FDD sub-CPU).
-- **FM sound (YM2203), CRTC / DMA, FDC and the rest**: newly written for this project. The hardware behaviour was studied from the source code and documents of **MAME**, **QUASI88** and **M88**.
+- **FM sound (YM2608 / OPNA), CRTC / DMA, FDC and the rest**: newly written for this project. The hardware behaviour was studied from the source code and documents of **MAME**, **QUASI88** and **M88**. The OPNA rhythm / ADPCM / status flags follow the behaviour and levels of **fmgen** (cisc) as used in M88 and the Common Source Project.
 
 ### 📜 Core Licenses
 The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own license.
@@ -42,7 +42,8 @@ The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own l
 - **Board Manager**: ESP32 by Espressif Systems (**v2.0.5 Recommended**)
 - **Library**: FabGL v1.0.9
 - **Board**: `ESP32 Dev Module` (TTGO VGA32)
-- **PSRAM**: `"Enabled"` (required). Older ESP32 chips (revision 0–2, found on many TTGO VGA32 boards) have a PSRAM bug (Espressif errata CPU-3.9), and `"Enabled"` makes the compiler add a workaround for it. On chip revision 3 or later you may choose `"Disabled"` instead: the sketch turns PSRAM on by itself and runs about 30% faster without the workaround. On an older chip a `"Disabled"` build stops at startup with a message, because it could occasionally corrupt memory. The upload log shows the revision (e.g. "Chip is ESP32-D0WDQ6 (revision 1)").
+- **PSRAM** (ON = `"Enabled"`, OFF = `"Disabled"`): With PSRAM ON, a software workaround for the chip errata (Espressif errata CPU-3.9) is built in, and the speed drops by about 20%. With PSRAM OFF, the sketch enables PSRAM by itself and the software workaround is not built in. However, this causes failures unless the ESP32 is chip revision 3 or later, so on any other revision a PSRAM OFF build is made not to start. In this project, turning PSRAM OFF makes 8MHz selectable in the boot menu, thanks to the extra speed.
+- **Switching machines with EmuLauncher** (optional): copy `emu_switch.h` and `partitions.csv` from the `EmuLauncher` folder into this sketch folder. The boot menu then gets **Next** (the machine to start next), and the flash is laid out as in `partitions.csv` (the Partition Scheme setting is not used). Without the two files the sketch works on its own as before. See `EmuLauncher/README.md`.
 - **Display rate** (`#define PC88_VGA_HZ` near the top of `PC88.ino`):
   - `55` (default): 55.4 Hz, same speed as the real machine.
   - `56`: 56.0 Hz, for monitors that do not accept 55.4 Hz. Software runs about 1% faster.
@@ -61,6 +62,8 @@ The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own l
     ├── DISK.ROM         : FDD unit ROM 2KB / 8KB (without it, disks cannot be used)
     ├── KANJI1.ROM       : Kanji ROM level 1, 128KB (the character font is also taken from here)
     ├── KANJI2.ROM       : Kanji ROM level 2 (optional)
+    ├── 2608_BD.WAV, 2608_SD.WAV, 2608_TOP.WAV, 2608_HH.WAV, 2608_TOM.WAV, 2608_RIM.WAV
+    │                    : OPNA rhythm samples (the same files as M88; 16-bit mono PCM; optional, missing ones are silent)
     ├── JOYKEY.CFG       : Joystick button key assignment (created automatically)
     └── <folders>/*.D88  : Disk images (sub-folders are allowed)
 ```
@@ -75,6 +78,7 @@ The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own l
 | Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
 | Clock | Main CPU 4MHz / 8MHz (the clock switch of the PC-8801FH and later; software reads it at port 6Eh). 8MHz runs about 1.6× faster than 4MHz, like the real machine with its memory wait. Shown only when the sketch is built without the PSRAM workaround (`"Disabled"` on chip revision 3 or later); the workaround build is too slow for 8MHz. |
 | Joy B1〜B3 | Key pressed by joystick buttons 1–3 (Enter → press the key; F6–F12 cancel). Default SPACE / RETURN / ESC. |
+| Next | The machine to start next. Shown only with EmuLauncher's two files (see Build Settings). Enter changes it; it takes effect at the next power-on or reset. |
 | Run | Start |
 
 The boot menu and the disk selectors can also be operated with the 1P controller: Up/Down = select (repeats while held), Left/Right = page up/down, button 1 = Enter, button 2 = cancel (ESC).
@@ -125,7 +129,7 @@ IN NO EVENT SHALL FABRIZIO DI VITTORIO, MARAT FAYZULLIN, OR THE DEVELOPER BE LIA
 <a id="日本語"></a>
 # 日本語
 
-ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュレータです（開発中）。VGA 出力、PS/2 キーボード、D88 ディスクイメージ、FDD のサブ CPU、FM 音源（YM2203）、シリアル接続の外部ジョイスティックに対応しています。
+ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュレータです（開発中）。VGA 出力、PS/2 キーボード、D88 ディスクイメージ、FDD のサブ CPU、FM 音源（YM2608 / OPNA。PC-8801FA/MA と同じ）、シリアル接続の外部ジョイスティックに対応しています。
 
 ## 📝 概要
 
@@ -133,9 +137,9 @@ ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュ�
   - これは **24kHz（高解像度）モニタをつないだ実機の垂直走査周波数**（25 行モード、1 フレーム 448 ラスタ・表示 400 ラスタ）です。性能の都合で下げた値ではありません。
   - PC-8801 が「約 60Hz」と言われるのは 15kHz（標準解像度）モニタのときの値（約 61〜62Hz）です。このエミュレータは 24kHz モニタのみを再現しています。
   - VGA には 640×400（PC-8801 の 1 ラインを 2 回表示）を、エミュレーションと同じ **55.4Hz** で出し、フレームの始まりを VGA の垂直帰線に合わせているので、絵が裂けません。モニタが 55.4Hz を受け付けないときは、下の `PC88_VGA_HZ` を見てください。
-- **再現しているもの**: 本体 Z80（4MHz）＋ FDD のサブ CPU（Z80）、N88-BASIC V2 / V1(S) / V1(H) / N-BASIC、テキスト（μPD3301 CRTC ＋ μPD8257 DMA、属性、セミグラフィック、スキップライン）、640×200 8 色グラフィックとアナログパレット、ALU・独立アクセス、YM2203 FM 3ch（SSG-EG・CSM 音声合成を含む）＋ SSG 3ch、ビープと SING（CPU がスピーカーを直接鳴らす 1 ビットの音。ハイドライドなど SR より前のソフトの音楽）、μPD765 FDC と D88 イメージ（1 ファイルに複数枚入った D88 も可）。
-- **再現していないもの**: 15kHz モニタ、640×400 白黒（200 ラインに間引いて表示）、サウンドボード II（OPNA）、ジョイスティック端子、CMT・RS-232C・マウス、メモリウェイト。
-- **サウンド**: 16384Hz（FabGL の標準）。FM と SSG を混ぜて 8bit DAC に出力します。
+- **再現しているもの**: 本体 Z80（4MHz）＋ FDD のサブ CPU（Z80）、N88-BASIC V2 / V1(S) / V1(H) / N-BASIC、テキスト（μPD3301 CRTC ＋ μPD8257 DMA、属性、セミグラフィック、スキップライン）、640×200 8 色グラフィックとアナログパレット、ALU・独立アクセス、YM2608（OPNA。PC-8801FA/MA と同じく 44h〜47h）: FM 6ch（LFO・SSG-EG・CSM 音声合成を含む）＋ SSG 3ch ＋ リズム音源（2608_*.WAV が必要）＋ ADPCM（RAM 256KB）。YM2203 しか知らないソフトは mkIISR と同じ音、ビープと SING（CPU がスピーカーを直接鳴らす 1 ビットの音。ハイドライドなど SR より前のソフトの音楽）、μPD765 FDC と D88 イメージ（1 ファイルに複数枚入った D88 も可）。
+- **再現していないもの**: 15kHz モニタ、640×400 白黒（200 ラインに間引いて表示）、A8h〜ADh のサウンドボード II（OPNA は 44h〜47h）、ステレオ（出力はモノラル）、ジョイスティック端子、CMT・RS-232C・マウス、メモリウェイト。
+- **サウンド**: 16384Hz（FabGL の標準）。FM・SSG・リズム・ADPCM を混ぜて 8bit DAC に出力します。
 
 > ⚠️ **開発・ライセンスに関するご注意**
 >
@@ -148,7 +152,7 @@ ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュ�
 
 - **グラフィック/オーディオエンジン**: Fabrizio Di Vittorio 氏による [FabGL](https://github.com/fdivitto/FabGL) を使用。
 - **Z80 CPU コア**: Marat Fayzullin 氏のコードをベースに改変（本体とサブ CPU の両方に使用）。
-- **FM 音源（YM2203）、CRTC・DMA、FDC など**: 本プロジェクトで新規に作成。実機の動作は **MAME**・**QUASI88**・**M88** のソースコードと資料を突き合わせて調べました。
+- **FM 音源（YM2608 / OPNA）、CRTC・DMA、FDC など**: 本プロジェクトで新規に作成。実機の動作は **MAME**・**QUASI88**・**M88** のソースコードと資料を突き合わせて調べました。OPNA のリズム・ADPCM・フラグの動きと音量は、M88 や Common Source Project が使っている **fmgen**（cisc 氏）に合わせています。
 
 ### 📜 各コアのライセンスについて
 Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセンスに従います。
@@ -160,7 +164,8 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
 - **ボードマネージャ**: ESP32 by Espressif Systems（**v2.0.5 推奨**）
 - **ライブラリ**: FabGL v1.0.9
 - **ボード**: `ESP32 Dev Module`（TTGO VGA32）
-- **PSRAM**: `"Enabled"`（必須）。古い ESP32（リビジョン 0〜2。TTGO VGA32 にも多い）には PSRAM の不具合（Espressif errata CPU-3.9）があり、`"Enabled"` にするとコンパイラがその回避策を入れます。チップがリビジョン 3 以降なら `"Disabled"` でもよく、スケッチが起動時に PSRAM を有効にし、回避策が入らないぶん約 3 割速くなります。古いチップで `"Disabled"` にしたものは、まれにメモリが壊れるため、起動時に理由を表示して止まります。リビジョンは書き込みのときのログ（「Chip is ESP32-D0WDQ6 (revision 1)」など）で分かります。
+- **PSRAM**（ON = `"Enabled"`、OFF = `"Disabled"`）: PSRAMをONにするとソフトでのエラッタ対策が入り、20%程度速度が低下します。PSRAMをOFFにするとソフトでPSRAMを有効にし、ソフトでのエラッタ対策は入りません。但し、ESP32のリビジョンが3以降でないと不具合が発生するため、それ以外のリビジョンでPSRAMをOFFにしても起動しなくしてあります。本プロジェクトではPSRAMをOFFにすると、高速化の恩恵として8MHzが選択できるようになります。
+- **EmuLauncher での機種の切り替え**（使うときだけ）: `EmuLauncher` のフォルダの `emu_switch.h` と `partitions.csv` を、このスケッチのフォルダにコピーします。起動メニューに **Next**（次に起動する機種）が出て、フラッシュの分け方が `partitions.csv` のとおりになります（Partition Scheme の設定は使われません）。2 つのファイルが無ければ、今までどおり単体で動きます。詳しくは `EmuLauncher/README.md` を見てください。
 - **画面の周波数**（`PC88.ino` の先頭近くの `#define PC88_VGA_HZ`）:
   - `55`（既定）: 55.4Hz。実機と同じ速さです。
   - `56`: 56.0Hz。55.4Hz が映らないモニタ用です。ソフトが約 1% 速くなります。
@@ -179,6 +184,8 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
     ├── DISK.ROM         : ディスクユニットの ROM 2KB / 8KB（無いとディスクは使えない）
     ├── KANJI1.ROM       : 第 1 水準漢字 ROM 128KB（文字のフォントもここから）
     ├── KANJI2.ROM       : 第 2 水準漢字 ROM（無くてもよい）
+    ├── 2608_BD.WAV, 2608_SD.WAV, 2608_TOP.WAV, 2608_HH.WAV, 2608_TOM.WAV, 2608_RIM.WAV
+    │                    : OPNA のリズム音源の音（M88 と同じファイル。16 ビット・モノラルの PCM。無くてもよく、無い音は鳴らない）
     ├── JOYKEY.CFG       : ジョイスティックのボタンのキー割り当て（自動で作られる）
     └── <フォルダ>/*.D88 : ディスクイメージ（フォルダ分けしてよい）
 ```
@@ -193,6 +200,7 @@ Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセ
 | Mode | N88-BASIC V2 / V1(S) / V1(H) / N-BASIC |
 | Clock | 本体の CPU を 4MHz / 8MHz にする（PC-8801FH 以降のクロックの切り替えスイッチ。ソフトはポート 6Eh で読む）。8MHz は実機と同じくメモリウェイトの分を差し引いて 4MHz の約 1.6 倍。PSRAM の回避策なしで組み立てたとき（リビジョン 3 以降のチップで `"Disabled"`）だけ出ます（回避策ありでは 8MHz に追いつかないため）。 |
 | Joy B1〜B3 | ジョイスティックのボタン 1〜3 で押すキー（Enter のあと割り当てるキーを押す。F6〜F12 で取り消し）。既定は SPACE / RETURN / ESC。 |
+| Next | 次に起動する機種。EmuLauncher の 2 つのファイルを置いたときだけ出ます（ビルド設定を参照）。Enter で変わり、電源を入れ直すかリセットすると切り替わります。 |
 | Run | 起動 |
 
 起動メニューとディスクの選択画面は、1P のコントローラでも操作できます：↑↓ = 選択（押し続けると連続）、←→ = 1画面送り、ボタン 1 = 決定（Enter）、ボタン 2 = 取り消し（ESC）。

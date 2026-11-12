@@ -27,8 +27,13 @@ struct Ym2203Fm;
 
 Ym2203Fm *ym2203Create(uint32_t clock, uint32_t rate);
 void      ym2203Reset(Ym2203Fm *fm);
-void      ym2203WriteReg(Ym2203Fm *fm, uint8_t reg, uint8_t val);
-void      ym2203Generate(Ym2203Fm *fm, int32_t *out, int n);
+void      ym2203WriteReg(Ym2203Fm *fm, uint16_t addr, uint8_t val);
+void      ym2203Generate(Ym2203Fm *fm, int32_t *out, int n, int32_t *rhythm = nullptr);
+
+int       ym2203RhythmFromWav(const uint8_t *wav, uint32_t len, uint32_t rate, int16_t *out, int outMax);
+void      ym2203SetRhythm(Ym2203Fm *fm, int i, const int16_t *data, int len);
+
+void      ym2203SetAdpcmRam(Ym2203Fm *fm, const uint8_t *ram);
 
 struct Ym2203Timer {
   uint32_t clock;

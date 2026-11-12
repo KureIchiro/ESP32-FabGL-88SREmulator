@@ -51,6 +51,22 @@ struct Pc88State {
   uint8_t  opnAddr;
   Ym2203Timer opnTimer;
   uint8_t  ssgShadow[16];
+  uint8_t  opnAddrHi;
+  uint8_t  opnReg29;
+  uint8_t  opnStMask;
+  uint8_t  opnStatus;
+  uint8_t  opnStatusNext;
+  struct {
+    uint8_t  ctl1, ctl2;
+    uint8_t  reg[16];
+    uint8_t  gran;
+    uint32_t start, stop, limit;
+    uint32_t memaddr;
+    uint16_t deltaN;
+    uint8_t  rdBuf[2];
+    bool     play;
+    int64_t  remain;
+  } adpcm;
 };
 extern Pc88State pc88;
 
