@@ -29,11 +29,11 @@ An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Wor
 ## 🤝 Credits & Acknowledgments
 
 - **Graphics/Audio Engine**: Uses [FabGL](https://github.com/fdivitto/FabGL) by Fabrizio Di Vittorio.
-- **Z80 CPU Core**: Modified based on the work by Marat Fayzullin (used for both the main CPU and the FDD sub-CPU).
+- **Z80 CPU Core**: z80core, written for this collection (MIT License, Copyright Kure Ichiro; `z80core.c` / `z80core.h`), used for both the main CPU and the FDD sub-CPU.
 - **FM sound (YM2608 / OPNA), CRTC / DMA, FDC and the rest**: newly written for this project. The hardware behaviour was studied from the source code and documents of **MAME**, **QUASI88** and **M88**. The OPNA rhythm / ADPCM / status flags follow the behaviour and levels of **fmgen** (cisc) as used in M88 and the Common Source Project.
 
 ### 📜 Core Licenses
-The Z80 core follows Marat Fayzullin's **fMSX License**; FabGL follows its own license.
+The Z80 core (z80core) is under the **MIT License**; FabGL follows its own license.
 
 ---
 
@@ -123,7 +123,7 @@ Same converter and protocol as the MSX / MarkIII emulators: serial `IO39`, 11520
 
 ## Disclaimer
 
-IN NO EVENT SHALL FABRIZIO DI VITTORIO, MARAT FAYZULLIN, OR THE DEVELOPER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE. USE AT YOUR OWN RISK.
+IN NO EVENT SHALL FABRIZIO DI VITTORIO OR THE DEVELOPER BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE. USE AT YOUR OWN RISK.
 
 ---
 
@@ -152,11 +152,11 @@ ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュ�
 ## 🤝 クレジットと謝辞
 
 - **グラフィック/オーディオエンジン**: Fabrizio Di Vittorio 氏による [FabGL](https://github.com/fdivitto/FabGL) を使用。
-- **Z80 CPU コア**: Marat Fayzullin 氏のコードをベースに改変（本体とサブ CPU の両方に使用）。
+- **Z80 CPU コア**: このシリーズのために書いた z80core（MIT ライセンス、Copyright Kure Ichiro。`z80core.c`・`z80core.h`）。本体とサブ CPU の両方に使用。
 - **FM 音源（YM2608 / OPNA）、CRTC・DMA、FDC など**: 本プロジェクトで新規に作成。実機の動作は **MAME**・**QUASI88**・**M88** のソースコードと資料を突き合わせて調べました。OPNA のリズム・ADPCM・フラグの動きと音量は、M88 や Common Source Project が使っている **fmgen**（cisc 氏）に合わせています。
 
 ### 📜 各コアのライセンスについて
-Z80 コアは Marat Fayzullin 氏の **fMSX License**、FabGL はそのライセンスに従います。
+Z80 コア（z80core）は **MIT ライセンス**、FabGL はそのライセンスに従います。
 
 ---
 
@@ -246,4 +246,4 @@ MSX・マーク III 版と同じ変換器・同じ通信仕様です：シリア
 
 ## 免責事項
 
-本ソフトウェアの使用によって生じたいかなる損害についても、FABRIZIO DI VITTORIO 氏、MARAT FAYZULLIN 氏、および開発者は一切の責任を負いません。自己責任でご利用ください。
+本ソフトウェアの使用によって生じたいかなる損害についても、FABRIZIO DI VITTORIO 氏および開発者は一切の責任を負いません。自己責任でご利用ください。

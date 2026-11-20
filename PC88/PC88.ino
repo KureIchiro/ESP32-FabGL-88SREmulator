@@ -1,6 +1,6 @@
 /* ============================================================================
  *  NEC PC-8801mkIISR Emulator for ESP32 (TTGO VGA32) — 作成中
- *  --- MSX2 / X1 エミュレータと同じ作り(FabGL、Marat Fayzullin 氏の Z80 コア) ---
+ *  --- MSX2 / X1 エミュレータと同じ作り(FabGL、このシリーズの Z80 コア z80core) ---
  *
  *  【必要なファイル(SD カード /PC88/)】
  *   N88.ROM      N88-BASIC 32KB(必須)
@@ -50,7 +50,7 @@
 #else
 #define psramFixMissing() (ESP.getChipRevision() < 3)
 #endif
-#include "Z80.h"
+#include "z80core.h"
 #include "pc88.h"
 #include "ym2203.h"
 
@@ -68,7 +68,7 @@
 // #define SD_MOSI 12
 // #define SD_CS   13
 
-// Switch Science FabGL 
+// Switch Science FabGL
 // #define SD_SCLK 14
 // #define SD_MISO 35
 // #define SD_MOSI 2
@@ -105,20 +105,18 @@ struct Pc88KeyMap { uint8_t ps2; bool ext; uint8_t row, bit; };
 #include "pc88_keymap.h"
 
 extern "C" {
-  extern Z80 cpu;
-  byte InZ80(zword Port);
-  void OutZ80(zword Port, byte Value);
-  void PatchZ80(Z80 *R);
+  extern z80_t cpu;
+  uint8_t InZ80(uint16_t Port);
+  void OutZ80(uint16_t Port, uint8_t Value);
 }
-Z80 cpu;
-byte IRAM_ATTR InZ80(zword Port) { return pc88In(Port); }
-void IRAM_ATTR OutZ80(zword Port, byte Value) { pc88Out(Port, Value); }
-void PatchZ80(Z80 *R) {}
+z80_t cpu;
+uint8_t IRAM_ATTR InZ80(uint16_t Port) { return pc88In(Port); }
+void IRAM_ATTR OutZ80(uint16_t Port, uint8_t Value) { pc88Out(Port, Value); }
 
 static int cpuLineCycles = CPU_CYCLES_PER_LINE;
 
 int pc88LineCycle() {
-  int c = cpuLineCycles - cpu.ICount;
+  int c = cpuLineCycles - cpu.icount;
   if (cpuLineCycles != CPU_CYCLES_PER_LINE) c = c * CPU_CYCLES_PER_LINE / cpuLineCycles;
   return c < 0 ? 0 : c >= CPU_CYCLES_PER_LINE ? CPU_CYCLES_PER_LINE - 1 : c;
 }
@@ -1175,15 +1173,15 @@ void cpuTask(void *) {
     for (int i = 0; i < PC88_LINES_PER_FRAME; i++) {
 #ifdef USE_SERIAL_DEBUG
       uint32_t c0 = ESP.getCycleCount();
-      ExecZ80(&cpu, cpuLineCycles);
+      z80core_run(&cpu, cpuLineCycles);
       z80Clk += ESP.getCycleCount() - c0;
 #else
-      ExecZ80(&cpu, cpuLineCycles);
+      z80core_run(&cpu, cpuLineCycles);
 #endif
       pc88Line(i);
       opnEmuClock += CPU_CYCLES_PER_LINE;
       if (i == PC88_DISPLAY_LINES) frameReady = true;
-      if (pc88IrqPending() && (cpu.IFF & IFF_1)) IntZ80(&cpu, pc88IrqAck());
+      if (pc88IrqPending() && cpu.iff1) z80core_int(&cpu, (uint8_t)pc88IrqAck());
     }
     int64_t now = esp_timer_get_time();
 #ifdef USE_SERIAL_DEBUG
@@ -1352,9 +1350,7 @@ void setup() {
 
   pc88Init(mem, config);
   cpuLineCycles = config.cpu8MHz ? PC88_CYCLES_8MHZ : CPU_CYCLES_PER_LINE;
-  memset(&cpu, 0, sizeof(cpu));
-  ResetZ80(&cpu);
-  cpu.IPeriod = cpuLineCycles;
+  z80core_init(&cpu);
   Serial.printf("PC-8801 Booting... (CPU %dMHz)\n", config.cpu8MHz ? 8 : 4);
   HEAPLOG("end setup");
   xTaskCreatePinnedToCore(cpuTask, "cpuTask", 8192, NULL, 24, NULL, 0);

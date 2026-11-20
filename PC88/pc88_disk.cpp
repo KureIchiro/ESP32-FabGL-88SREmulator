@@ -19,25 +19,21 @@
 #pragma GCC optimize("O3")
 #endif
 #include "pc88_internal.h"
-#include "Z80.h"
+#include "z80core.h"
 #include <stdio.h>
 #include <string.h>
 
 extern "C" {
   uint8_t *pc88s_rd_map[16];
   uint8_t *pc88s_wr_map[16];
-  int  ExecZ80Sub(Z80 *R, int RunCycles);
-  void ResetZ80Sub(Z80 *R);
-  void IntZ80Sub(Z80 *R, zword Vector);
-  byte InZ80Sub(zword Port);
-  void OutZ80Sub(zword Port, byte Value);
-  void PatchZ80Sub(Z80 *R);
-#ifdef DEBUG
-  byte DebugZ80Sub(Z80 *R);
-#endif
+  void z80sub_init(z80_t *z);
+  int  z80sub_run(z80_t *z, int cycles);
+  int  z80sub_int(z80_t *z, uint8_t vector);
+  uint8_t InZ80Sub(uint16_t Port);
+  void OutZ80Sub(uint16_t Port, uint8_t Value);
 }
 
-static Z80     sub;
+static z80_t   sub;
 static bool    present;
 static uint8_t romImg[0x2000];
 static uint8_t romFF[0x1000];
@@ -78,7 +74,7 @@ static void pioControl(Pio &p, uint8_t v) {
   }
 }
 
-extern "C" byte InZ80Sub(zword port) {
+extern "C" uint8_t InZ80Sub(uint16_t port) {
   switch (port & 0xFF) {
     case 0xF8: upd765TC(); return 0xFF;
     case 0xFA: return upd765ReadStatus();
@@ -95,7 +91,7 @@ extern "C" byte InZ80Sub(zword port) {
   }
 }
 
-extern "C" void OutZ80Sub(zword port, byte v) {
+extern "C" void OutZ80Sub(uint16_t port, uint8_t v) {
   if (pc88PioHook && (port & 0xFF) >= 0xFC) pc88PioHook(1, port & 0xFF, v, true);
   switch (port & 0xFF) {
     case 0xF8: break;
@@ -107,38 +103,23 @@ extern "C" void OutZ80Sub(zword port, byte v) {
     default: break;
   }
 }
-extern "C" void PatchZ80Sub(Z80 *R) {}
 #ifdef PC88_SUB_TRACE
-static struct { uint16_t pc, af, bc, de, hl; } subTrace[4096];
-static unsigned subTraceN;
-extern "C" byte DebugZ80Sub(Z80 *R) {
-  auto &t = subTrace[subTraceN++ & 4095];
-  t.pc = R->PC.W; t.af = R->AF.W; t.bc = R->BC.W; t.de = R->DE.W; t.hl = R->HL.W;
-  return 1;
-}
-void pc88DiskTrace(int n) {
-  if (n > 4096) n = 4096;
-  for (int i = n; i > 0; i--) {
-    auto &t = subTrace[(subTraceN - i) & 4095];
-    printf("  sub PC=%04X op=%02X AF=%04X BC=%04X DE=%04X HL=%04X\n", t.pc, pc88s_rd_map[t.pc >> 12][t.pc & 0xFFF], t.af, t.bc, t.de, t.hl);
-  }
-}
-#elif defined(DEBUG)
-extern "C" byte DebugZ80Sub(Z80 *R) { return 1; }
+void pc88DiskTrace(int n) { (void)n; }
 #endif
 
 static void subIrq() {
-  if (!(sub.IFF & IFF_1) || !upd765Irq()) return;
-  if (sub.IFF & IFF_IM1) { IntZ80Sub(&sub, 0x0038); return; }
-  if (sub.IFF & IFF_IM2) { IntZ80Sub(&sub, 0x0000); return; }
-  if (sub.IFF & IFF_HALT) { sub.PC.W++; sub.IFF &= (uint8_t)~IFF_HALT; }
-  sub.IFF &= (uint8_t)~(IFF_1 | IFF_2 | IFF_EI);
+  if (!sub.iff1 || !upd765Irq()) return;
+  if (sub.im == 1) { z80sub_int(&sub, 0xFF); return; }
+  if (sub.im == 2) { z80sub_int(&sub, 0x00); return; }
+  sub.halted = 0;
+  sub.ei_delay = 0;
+  sub.iff1 = sub.iff2 = 0;
 }
 
 static void syncSub(int target) {
   while (subCycles < target) {
     int slice = target - subCycles < 64 ? target - subCycles : 64;
-    int left = ExecZ80Sub(&sub, slice);
+    int left = z80sub_run(&sub, slice);
     int ran = slice - left;
     subCycles += ran > 0 ? ran : slice;
     subIrq();
@@ -188,7 +169,7 @@ void pc88DiskLine() {
 
 void pc88DiskDebug(char *buf, int size) {
   snprintf(buf, size, "sub PC=%04X SP=%04X IFF=%02X sleep=%d polls=%d mPB=%02X mPC=%02X sPB=%02X sPC=%02X MSR=%02X irq=%d",
-           sub.PC.W, sub.SPtr.W, sub.IFF, subSleep, samePolls, pm.b, pm.c, ps.b, ps.c, upd765ReadStatus(), upd765Irq());
+           sub.pc.w, sub.sp.w, (sub.iff1 ? 1 : 0) | (sub.iff2 ? 8 : 0) | (sub.halted ? 0x80 : 0), subSleep, samePolls, pm.b, pm.c, ps.b, ps.c, upd765ReadStatus(), upd765Irq());
 }
 
 void pc88DiskInit() {
@@ -203,12 +184,7 @@ void pc88DiskInit() {
 void pc88DiskReset() {
   if (!present) return;
   subMap();
-  memset(&sub, 0, sizeof(sub));
-  ResetZ80Sub(&sub);
-  sub.IPeriod = PC88_CYCLES_PER_LINE;
-#ifdef PC88_SUB_TRACE
-  sub.Trace = 1;
-#endif
+  z80sub_init(&sub);
   pioControl(pm, 0x9B);
   pioControl(ps, 0x9B);
   subCycles = 0; subSleep = false; samePolls = 0; lastSubPCIn = 0; mainPolls = 0;
