@@ -17,7 +17,7 @@ An emulator for the NEC PC-8801mkIISR using ESP32 and the **FabGL** library (Wor
   - VGA output is 640x400 (each PC-8801 line is shown twice) at **55.4 Hz**, the same rate as the emulation, and each frame starts at the VGA vertical blank so the picture never tears. If your monitor does not accept 55.4 Hz, see `PC88_VGA_HZ` below.
 - **Emulated**: main Z80 (4 MHz) + FDD sub-CPU Z80, N88-BASIC V2 / V1(S) / V1(H) / N-BASIC, text (μPD3301 CRTC + μPD8257 DMA, attributes, semigraphics, skip line), 640x200 8-colour graphics with analog palette, ALU / independent plane access, YM2608 (OPNA) at ports 44h–47h as on the PC-8801FA/MA: FM 6ch (with LFO, SSG-EG and CSM voice) + SSG 3ch + rhythm (needs the 2608_*.WAV sample files) + ADPCM with 256KB RAM (software that only knows the YM2203 sounds the same as on the mkIISR), beeper and SING (1-bit speaker used by pre-SR music, e.g. Hydlide), μPD765 FDC with D88 images (multi-image files supported).
 - **Not emulated**: 15 kHz monitor mode, 640x400 monochrome (shown thinned to 200 lines), Sound Board II at A8h–ADh (the OPNA is at 44h–47h instead), stereo (the output is mono), joystick port, CMT / RS-232C / mouse, memory wait.
-- **Audio**: 16384 Hz (FabGL default). FM, SSG, rhythm and ADPCM are mixed into the 8-bit DAC.
+- **Audio**: 32768 Hz (`SOUND_RATE` near the top of `PC88.ino`; 16384 = the FabGL default used before). FM, SSG, rhythm and ADPCM are mixed into the 8-bit DAC.
 
 > ⚠️ **Notice Regarding Development & Licenses**
 >
@@ -140,7 +140,7 @@ ESP32 と **FabGL** ライブラリを使った NEC PC-8801mkIISR のエミュ�
   - VGA には 640×400（PC-8801 の 1 ラインを 2 回表示）を、エミュレーションと同じ **55.4Hz** で出し、フレームの始まりを VGA の垂直帰線に合わせているので、絵が裂けません。モニタが 55.4Hz を受け付けないときは、下の `PC88_VGA_HZ` を見てください。
 - **再現しているもの**: 本体 Z80（4MHz）＋ FDD のサブ CPU（Z80）、N88-BASIC V2 / V1(S) / V1(H) / N-BASIC、テキスト（μPD3301 CRTC ＋ μPD8257 DMA、属性、セミグラフィック、スキップライン）、640×200 8 色グラフィックとアナログパレット、ALU・独立アクセス、YM2608（OPNA。PC-8801FA/MA と同じく 44h〜47h）: FM 6ch（LFO・SSG-EG・CSM 音声合成を含む）＋ SSG 3ch ＋ リズム音源（2608_*.WAV が必要）＋ ADPCM（RAM 256KB）。YM2203 しか知らないソフトは mkIISR と同じ音、ビープと SING（CPU がスピーカーを直接鳴らす 1 ビットの音。ハイドライドなど SR より前のソフトの音楽）、μPD765 FDC と D88 イメージ（1 ファイルに複数枚入った D88 も可）。
 - **再現していないもの**: 15kHz モニタ、640×400 白黒（200 ラインに間引いて表示）、A8h〜ADh のサウンドボード II（OPNA は 44h〜47h）、ステレオ（出力はモノラル）、ジョイスティック端子、CMT・RS-232C・マウス、メモリウェイト。
-- **サウンド**: 16384Hz（FabGL の標準）。FM・SSG・リズム・ADPCM を混ぜて 8bit DAC に出力します。
+- **サウンド**: 32768Hz（`PC88.ino` の先頭近くの `SOUND_RATE`。16384 にすると以前の FabGL の標準と同じ）。FM・SSG・リズム・ADPCM を混ぜて 8bit DAC に出力します。
 
 > ⚠️ **開発・ライセンスに関するご注意**
 >
